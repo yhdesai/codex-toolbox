@@ -4,6 +4,8 @@ Mirror Codex app-server sessions into a Telegram forum group.
 
 Each Codex thread gets one Telegram forum topic. Messages from Codex are mirrored into that topic, and replies from allowed Telegram users are routed back into the same Codex thread. The bridge also supports Telegram approval buttons for Codex permission requests.
 
+This project is intended for Codex users only right now. The easiest setup path is to open this repository in Codex and ask Codex to read `LLMs.txt`; that file is written as an agent setup guide.
+
 ## Features
 
 - One Telegram forum topic per Codex thread.
@@ -25,6 +27,18 @@ Each Codex thread gets one Telegram forum topic. Messages from Codex are mirrore
 - Your Telegram numeric user id for `TELEGRAM_ALLOWED_USER_IDS`.
 
 ## Quick Start
+
+### Let Codex Set It Up
+
+Open this repository in Codex and paste this prompt:
+
+```text
+Read LLMs.txt and set up this Codex Telegram Topic Sync app for me in this Codex instance. Install dependencies, run tests, configure the required environment variables using the values I provide, start the bridge, and tell me what to do in Telegram.
+```
+
+Codex should then follow `LLMs.txt` to install, test, configure, and run the bridge. You will still need to provide your Telegram bot token, your numeric Telegram user id, and a forum-enabled Telegram group where the bot is an admin.
+
+### Manual Setup
 
 Clone and install:
 
