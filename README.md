@@ -30,10 +30,10 @@ This project is intended for Codex users only right now. The easiest setup path 
 
 ### Let Codex Set It Up
 
-Open this repository in Codex and paste this prompt:
+Open Codex and paste this prompt:
 
 ```text
-Read LLMs.txt and set up this Codex Toolbox app for me in this Codex instance. Install dependencies, run tests, configure the required environment variables using the values I provide, start the bridge, and tell me what to do in Telegram.
+Clone https://github.com/yhdesai/codex-toolbox, read LLMs.txt, and set up Codex Toolbox in this Codex instance. Install dependencies, run tests, configure the required environment variables using the values I provide, start the bridge, and tell me what to do in Telegram.
 ```
 
 Codex should then follow `LLMs.txt` to install, test, configure, and run the bridge. You will still need to provide your Telegram bot token, your numeric Telegram user id, and a forum-enabled Telegram group where the bot is an admin.

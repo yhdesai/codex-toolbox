@@ -2,6 +2,8 @@
 
 This repository contains a Node.js bridge that mirrors Codex app-server threads into a Telegram forum group. Use this file when an AI agent needs to install, configure, run, or debug the app in a fresh Codex instance.
 
+Repository URL: https://github.com/yhdesai/codex-toolbox
+
 ## What The App Does
 
 - Connects to Codex app-server over JSON-RPC.
