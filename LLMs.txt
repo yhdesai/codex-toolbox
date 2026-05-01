@@ -111,6 +111,12 @@ npm start
 /new Test thread
 ```
 
+To start a thread in a specific directory:
+
+```text
+/new --cwd /absolute/path/to/project Test thread
+```
+
 Then send a Telegram reply inside the new topic and confirm it reaches Codex.
 
 For Discord, invite the bot to the server with Message Content Intent enabled and permissions for `Manage Channels`, `View Channels`, `Send Messages`, and `Read Message History`. Run:
@@ -181,6 +187,7 @@ pm2 save
 - `/bind`: bind current forum group.
 - `/help`: list commands.
 - `/new Optional title`: create Codex thread and Telegram topic.
+- `/new --cwd /absolute/path Optional title`: create Codex thread and Telegram topic rooted in a specific directory. `--dir` is accepted as an alias. Paths must be absolute; `~/path` is supported.
 - `/topics`: list mappings.
 - `/delete_all_topics confirm`: delete Codex-mapped Telegram topics and clear mappings.
 - `/unlink`: remove current topic mapping without deleting the topic.
@@ -246,6 +253,7 @@ DISCORD_ALLOWED_USER_IDS=<discord-user-id>
 - Existing mapped CLI sessions start file tailing at EOF to avoid backfilling old history.
 - Newly discovered CLI sessions start file tailing at byte 0 so the first CLI prompt and answer can appear in the newly created topic.
 - `/delete_all_topics confirm` can only delete topics known in local bridge state; Telegram bots cannot enumerate arbitrary forum topics.
+- Telegram `/new --cwd` validates that the requested directory exists before calling Codex `thread/start` with `cwd`.
 
 ## Useful Diagnostics
 

@@ -71,8 +71,11 @@ export class CodexAppServer extends EventEmitter {
     return this.client.request('thread/resume', { threadId });
   }
 
-  async createThread(title = 'Telegram') {
-    const result = await this.client.request('thread/start', {});
+  async createThread(title = 'Telegram', options = {}) {
+    const params = {
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+    };
+    const result = await this.client.request('thread/start', params);
     const threadId = extractThreadId(result);
     if (threadId && title) {
       await this.renameThread(threadId, title);

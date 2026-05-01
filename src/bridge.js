@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { approvalKeyboard, getCommand, isForumMessage } from './telegram.js';
 import { approvalLabels, extractUserMessageText, renderApprovalPrompt, renderCodexEvent } from './mirror-policy.js';
 
@@ -204,7 +204,7 @@ export class CodexTelegramTopicBridge {
       text: [
         'Codex Toolbox commands',
         '/bind - bind this forum group',
-        '/new Optional title - create a Codex thread and topic',
+        '/new [--cwd /path] Optional title - create a Codex thread and topic',
         '/topics - list mapped Codex topics',
         '/delete_all_topics confirm - delete all Codex-mapped topics',
         '/unlink - remove mapping for this topic',
@@ -225,13 +225,23 @@ export class CodexTelegramTopicBridge {
       await this.telegram.sendMessage({ chatId: message.chat.id, text: 'Use /bind in the forum group before creating Codex threads.' });
       return;
     }
-    const title = message.text.replace(/^\/new(@\w+)?/i, '').trim() || 'Telegram thread';
-    const threadId = await this.codex.createThread(title);
+    const parsed = parseNewThreadArgs(message);
+    if (parsed.error) {
+      await this.telegram.sendMessage({ chatId: message.chat.id, messageThreadId: message.message_thread_id, text: parsed.error });
+      return;
+    }
+    const cwd = parsed.cwd ? await resolveExistingDirectory(parsed.cwd) : null;
+    if (parsed.cwd && !cwd) {
+      await this.telegram.sendMessage({ chatId: message.chat.id, messageThreadId: message.message_thread_id, text: `Directory not found or not a directory: ${parsed.cwd}` });
+      return;
+    }
+    const title = parsed.title || (cwd ? cwd.split('/').filter(Boolean).at(-1) : null) || 'Telegram thread';
+    const threadId = await this.codex.createThread(title, { cwd });
     const topicId = await this.telegram.createForumTopic(this.state.boundChatId, title);
     await this.state.mapThread(threadId, topicId, title);
     await this.codex.resumeThread(threadId);
     this.subscribedThreads.add(String(threadId));
-    await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId: topicId, text: `Created Codex thread ${threadId}` });
+    await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId: topicId, text: `Created Codex thread ${threadId}${cwd ? `\nDirectory: ${cwd}` : ''}` });
   }
 
   async #status(message) {
@@ -753,6 +763,84 @@ function isRateLimited(error) {
 
 function commandArgs(message, command) {
   return String(message.text ?? '').replace(new RegExp(`^${command}(?:@\\w+)?`, 'i'), '').trim();
+}
+
+function parseNewThreadArgs(message) {
+  const args = commandArgs(message, '/new');
+  const tokens = splitCommandTokens(args);
+  if (tokens.error) return { error: tokens.error };
+  let cwd = null;
+  const titleParts = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === '--cwd' || token === '--dir') {
+      const value = tokens[index + 1];
+      if (!value) return { error: `Usage: /new --cwd /absolute/path Optional title` };
+      cwd = expandHome(value);
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('--cwd=')) {
+      cwd = expandHome(token.slice('--cwd='.length));
+      continue;
+    }
+    if (token.startsWith('--dir=')) {
+      cwd = expandHome(token.slice('--dir='.length));
+      continue;
+    }
+    titleParts.push(token);
+  }
+  if (cwd && !isAbsolute(cwd)) return { error: `Use an absolute directory path for --cwd. Got: ${cwd}` };
+  return { cwd, title: titleParts.join(' ').trim() };
+}
+
+function splitCommandTokens(value) {
+  const tokens = [];
+  let current = '';
+  let quote = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (quote) return { error: 'Unclosed quote in /new command.' };
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function expandHome(value) {
+  const text = String(value ?? '').trim();
+  if (text === '~') return homedir();
+  if (text.startsWith('~/')) return join(homedir(), text.slice(2));
+  return text;
+}
+
+async function resolveExistingDirectory(value) {
+  try {
+    const resolved = await realpath(resolve(value));
+    const info = await stat(resolved);
+    return info.isDirectory() ? resolved : null;
+  } catch {
+    return null;
+  }
 }
 
 function redact(value) {

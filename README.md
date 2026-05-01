@@ -85,6 +85,12 @@ Then either start a new Codex session normally, or create one from Telegram:
 /new Investigate bug
 ```
 
+To start the new Codex thread in a specific directory:
+
+```text
+/new --cwd /absolute/path/to/project Investigate bug
+```
+
 For Discord, invite the bot to your server, then run:
 
 ```text
@@ -173,6 +179,7 @@ pm2 save
 - `/bind`: bind the current forum group.
 - `/help`: list available commands.
 - `/new Optional title`: create a Codex thread and Telegram topic.
+- `/new --cwd /absolute/path Optional title`: create a Codex thread in a specific directory. `--dir` is also accepted. Paths must be absolute; `~/path` is supported.
 - `/topics`: list current `threadId -> message_thread_id -> title` mappings.
 - `/delete_all_topics confirm`: delete all Codex-mapped Telegram topics, clear mappings and approvals, and keep the group binding.
 - `/unlink`: remove this topic's Codex mapping without deleting the Telegram topic.
@@ -240,6 +247,7 @@ Startup discovery does not backfill historical Codex sessions into Telegram topi
 
 - A new Codex thread appears after startup.
 - `/new` creates a thread.
+- `/new --cwd /absolute/path Optional title` creates a thread rooted in that directory.
 - An old unmapped thread shows fresh activity after startup.
 
 `/delete_all_topics confirm` only deletes topics known in the bridge state file. Telegram bots cannot enumerate every arbitrary topic in a forum group.

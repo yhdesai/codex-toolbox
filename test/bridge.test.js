@@ -683,8 +683,45 @@ test('/new creates a Codex thread and Telegram topic', async () => {
   await tick();
   await bridge.stop();
 
-  assert.equal(codex.created[0], 'Investigate bug');
+  assert.deepEqual(codex.created[0], { title: 'Investigate bug', options: { cwd: null } });
   assert.equal(state.getTopicForThread('new-thread'), 1001);
+});
+
+test('/new accepts --cwd to start a Codex thread in a directory', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-new-cwd-'));
+  const state = memoryState();
+  await state.bindChat(-100);
+  const telegram = fakeTelegram();
+  const codex = fakeCodex();
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  telegram.emit('update', { message: allowedMessage({ text: `/new --cwd "${dir}" Investigate bug`, chat: { id: -100, type: 'supergroup' } }) });
+  await delay(10);
+  await bridge.stop();
+
+  assert.deepEqual(codex.created[0], { title: 'Investigate bug', options: { cwd: dir } });
+  assert.equal(state.getTopicForThread('new-thread'), 1001);
+  assert.match(telegram.sent.at(-1).text, new RegExp(`Directory: ${escapeRegex(dir)}`));
+});
+
+test('/new rejects missing or relative cwd values', async () => {
+  const state = memoryState();
+  await state.bindChat(-100);
+  const telegram = fakeTelegram();
+  const codex = fakeCodex();
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  telegram.emit('update', { message: allowedMessage({ text: '/new --cwd relative-path Investigate bug', chat: { id: -100, type: 'supergroup' } }) });
+  await delay(10);
+  telegram.emit('update', { message: allowedMessage({ text: '/new --cwd /definitely/not/a/real/path Investigate bug', chat: { id: -100, type: 'supergroup' } }) });
+  await delay(10);
+  await bridge.stop();
+
+  assert.deepEqual(codex.created, []);
+  assert.match(telegram.sent.at(-2).text, /Use an absolute directory path/);
+  assert.match(telegram.sent.at(-1).text, /Directory not found/);
 });
 
 test('/interrupt inside topic calls Codex interrupt', async () => {
@@ -781,8 +818,8 @@ function fakeCodex({ threads = [] } = {}) {
   codex.listThreads = async () => codex.threads;
   codex.resumeThread = async (threadId) => codex.resumed.push(threadId);
   codex.sendToThread = async (threadId, text) => codex.sent.push({ threadId, text });
-  codex.createThread = async (title) => {
-    codex.created.push(title);
+  codex.createThread = async (title, options = {}) => {
+    codex.created.push({ title, options });
     return 'new-thread';
   };
   codex.interrupt = async (threadId) => codex.interrupted.push(threadId);
@@ -891,6 +928,10 @@ function memoryState() {
 
 function tick() {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function delay(ms) {
