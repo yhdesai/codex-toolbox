@@ -53,7 +53,7 @@ export class CodexAppServer extends EventEmitter {
 
   async initialize() {
     await this.client.request('initialize', {
-      clientInfo: { name: 'codex-telegram-topic-sync', title: null, version: '0.1.0' },
+      clientInfo: { name: 'codex-toolbox', title: null, version: '0.1.0' },
       capabilities: { experimentalApi: true },
     });
     this.client.notify('initialized', {});

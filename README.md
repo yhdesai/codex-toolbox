@@ -1,4 +1,4 @@
-# Codex Telegram Topic Sync
+# Codex Toolbox
 
 Mirror Codex app-server sessions into a Telegram forum group.
 
@@ -33,7 +33,7 @@ This project is intended for Codex users only right now. The easiest setup path 
 Open this repository in Codex and paste this prompt:
 
 ```text
-Read LLMs.txt and set up this Codex Telegram Topic Sync app for me in this Codex instance. Install dependencies, run tests, configure the required environment variables using the values I provide, start the bridge, and tell me what to do in Telegram.
+Read LLMs.txt and set up this Codex Toolbox app for me in this Codex instance. Install dependencies, run tests, configure the required environment variables using the values I provide, start the bridge, and tell me what to do in Telegram.
 ```
 
 Codex should then follow `LLMs.txt` to install, test, configure, and run the bridge. You will still need to provide your Telegram bot token, your numeric Telegram user id, and a forum-enabled Telegram group where the bot is an admin.
@@ -43,8 +43,8 @@ Codex should then follow `LLMs.txt` to install, test, configure, and run the bri
 Clone and install:
 
 ```sh
-git clone git@github.com:yhdesai/codex-sync.git
-cd codex-sync
+git clone https://github.com/yhdesai/codex-toolbox.git
+cd codex-toolbox
 npm install
 ```
 
@@ -83,7 +83,7 @@ TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id>[,<telegram-user-id>]
 CODEX_APP_SERVER_COMMAND=codex
 CODEX_APP_SERVER_ARGS="app-server proxy"
 CODEX_APP_SERVER_CWD=/path/to/workspace
-CODEX_TELEGRAM_STATE=~/.codex-telegram-topic-sync.json
+CODEX_TOOLBOX_STATE=~/.codex-toolbox.json
 CODEX_TELEGRAM_POLL_MS=5000
 ```
 
@@ -91,9 +91,11 @@ Defaults:
 
 - `CODEX_APP_SERVER_COMMAND`: `codex`
 - `CODEX_APP_SERVER_ARGS`: `app-server proxy`
-- `CODEX_TELEGRAM_STATE`: `~/.codex-telegram-topic-sync.json`
+- `CODEX_TOOLBOX_STATE`: `~/.codex-toolbox.json`
 - `CODEX_TELEGRAM_POLL_MS`: `5000`
 - `TELEGRAM_ALLOWED_USER_IDS`: empty, which means nobody can control the bridge
+
+`CODEX_TELEGRAM_STATE` and the `codex-telegram-topic-sync` binary name are still accepted as legacy aliases for existing installs.
 
 If `codex app-server proxy` does not initialize on your host, use direct stdio:
 
@@ -109,7 +111,7 @@ npm install -g pm2
 TELEGRAM_BOT_TOKEN=replace-me \
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id> \
 CODEX_APP_SERVER_ARGS="app-server proxy" \
-pm2 start bin/codex-telegram-topic-sync.js --name codex-telegram-topic-sync --update-env
+pm2 start bin/codex-toolbox.js --name codex-toolbox --update-env
 
 pm2 save
 ```
@@ -120,7 +122,7 @@ Restart with updated environment:
 TELEGRAM_BOT_TOKEN=replace-me \
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id> \
 CODEX_APP_SERVER_ARGS="app-server proxy" \
-pm2 restart codex-telegram-topic-sync --update-env
+pm2 restart codex-toolbox --update-env
 
 pm2 save
 ```
@@ -185,7 +187,7 @@ Startup discovery does not backfill historical Codex sessions into Telegram topi
 ## Security Notes
 
 - Do not commit real Telegram bot tokens.
-- Do not commit `~/.codex-telegram-topic-sync.json`; it contains group and topic ids.
+- Do not commit `~/.codex-toolbox.json`; it contains group and topic ids. Existing installs may also have the legacy `~/.codex-telegram-topic-sync.json` state file.
 - Keep `TELEGRAM_ALLOWED_USER_IDS` narrow. Allowed users can send messages to Codex and answer approval prompts.
 - `/logs` redacts token-shaped strings before sending diagnostics to Telegram, but avoid posting sensitive logs in shared groups.
 - The bot must be an admin to create, rename, and delete topics.
@@ -196,13 +198,13 @@ Check PM2 and logs:
 
 ```sh
 pm2 list
-pm2 logs codex-telegram-topic-sync --lines 120 --nostream
+pm2 logs codex-toolbox --lines 120 --nostream
 ```
 
 Inspect local bridge state:
 
 ```sh
-sed -n '1,220p' ~/.codex-telegram-topic-sync.json
+sed -n '1,220p' ~/.codex-toolbox.json
 ```
 
 Common issues:

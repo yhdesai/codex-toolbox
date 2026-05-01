@@ -1,4 +1,4 @@
-# Codex Telegram Topic Sync: Agent Setup Notes
+# Codex Toolbox: Agent Setup Notes
 
 This repository contains a Node.js bridge that mirrors Codex app-server threads into a Telegram forum group. Use this file when an AI agent needs to install, configure, run, or debug the app in a fresh Codex instance.
 
@@ -36,7 +36,7 @@ Optional environment:
 CODEX_APP_SERVER_COMMAND=codex
 CODEX_APP_SERVER_ARGS="app-server proxy"
 CODEX_APP_SERVER_CWD=/path/to/workspace
-CODEX_TELEGRAM_STATE=~/.codex-telegram-topic-sync.json
+CODEX_TOOLBOX_STATE=~/.codex-toolbox.json
 CODEX_TELEGRAM_POLL_MS=5000
 ```
 
@@ -99,7 +99,7 @@ npm install -g pm2
 TELEGRAM_BOT_TOKEN=replace-me \
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id> \
 CODEX_APP_SERVER_ARGS="app-server proxy" \
-pm2 start bin/codex-telegram-topic-sync.js --name codex-telegram-topic-sync --update-env
+pm2 start bin/codex-toolbox.js --name codex-toolbox --update-env
 
 pm2 save
 ```
@@ -110,7 +110,7 @@ Restart after env or code changes:
 TELEGRAM_BOT_TOKEN=replace-me \
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id> \
 CODEX_APP_SERVER_ARGS="app-server proxy" \
-pm2 restart codex-telegram-topic-sync --update-env
+pm2 restart codex-toolbox --update-env
 
 pm2 save
 ```
@@ -152,7 +152,7 @@ Do not commit:
 
 - Real Telegram bot tokens.
 - Real Telegram user ids unless the user explicitly wants examples containing them.
-- `~/.codex-telegram-topic-sync.json`.
+- `~/.codex-toolbox.json`.
 - PM2 logs.
 - Codex session JSONL files.
 - Local absolute paths from a user's machine.
@@ -179,10 +179,12 @@ TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id>
 
 ```sh
 pm2 list
-pm2 logs codex-telegram-topic-sync --lines 120 --nostream
-sed -n '1,220p' ~/.codex-telegram-topic-sync.json
+pm2 logs codex-toolbox --lines 120 --nostream
+sed -n '1,220p' ~/.codex-toolbox.json
 npm test
 ```
+
+Existing installs may still use the legacy `codex-telegram-topic-sync` binary name or `CODEX_TELEGRAM_STATE`; both remain supported for compatibility.
 
 Probe app-server direct stdio:
 

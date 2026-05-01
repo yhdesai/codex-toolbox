@@ -1,14 +1,15 @@
 {
-  "name": "codex-telegram-topic-sync",
+  "name": "codex-toolbox",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Bridge Codex app-server desktop sessions into Telegram forum topics.",
+  "description": "Codex tools for Telegram/Discord remote control, preview deployments, worktree management, and more.",
   "bin": {
+    "codex-toolbox": "./bin/codex-toolbox.js",
     "codex-telegram-topic-sync": "./bin/codex-telegram-topic-sync.js"
   },
   "scripts": {
-    "start": "node ./bin/codex-telegram-topic-sync.js",
+    "start": "node ./bin/codex-toolbox.js",
     "test": "node --test"
   },
   "engines": {

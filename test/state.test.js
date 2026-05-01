@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { BridgeState } from '../src/state.js';
 
 test('persists group binding and thread topic mappings', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'codex-sync-state-'));
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-state-'));
   const file = join(dir, 'state.json');
 
   const state = await BridgeState.load(file);
@@ -23,7 +23,7 @@ test('persists group binding and thread topic mappings', async () => {
 });
 
 test('approval records are one-shot', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'codex-sync-state-'));
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-state-'));
   const state = await BridgeState.load(join(dir, 'state.json'));
   await state.rememberApproval('cb1', { requestId: 7, threadId: 't1' });
 
@@ -35,7 +35,7 @@ test('approval records are one-shot', async () => {
 });
 
 test('persists ops metadata and mapping cleanup helpers', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'codex-sync-state-'));
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-state-'));
   const file = join(dir, 'state.json');
   const state = await BridgeState.load(file);
   await state.mapThread('thread-a', 42, 'Thread A');

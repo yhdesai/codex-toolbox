@@ -101,7 +101,7 @@ test('mapped threads are resumed on startup and events are mirrored', async () =
 });
 
 test('mapped CLI session files are tailed for new messages', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'codex-sync-cli-'));
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-cli-'));
   const file = join(dir, 'session.jsonl');
   await writeFile(file, `${sessionLine('user_message', { message: 'old' })}\n`, 'utf8');
   const state = memoryState();
@@ -122,7 +122,7 @@ test('mapped CLI session files are tailed for new messages', async () => {
 });
 
 test('newly discovered CLI session files mirror existing first turn after topic creation', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'codex-sync-cli-'));
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-cli-'));
   const file = join(dir, 'session.jsonl');
   await writeFile(file, `${sessionLine('user_message', { message: 'first prompt' })}\n${sessionLine('agent_message', { message: 'first answer' })}\n`, 'utf8');
   const state = memoryState();
@@ -404,7 +404,7 @@ test('/status reports bridge state', async () => {
   await bridge.stop();
 
   const status = telegram.sent.at(-1).text;
-  assert.match(status, /Codex Telegram sync status/);
+  assert.match(status, /Codex Toolbox status/);
   assert.match(status, /Bound group: -100/);
   assert.match(status, /Mapped threads: 1/);
   assert.match(status, /Mirroring paused: no/);

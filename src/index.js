@@ -22,7 +22,7 @@ export async function createBridge(options) {
 }
 
 export function createBridgeFromEnv(env) {
-  const statePath = env.CODEX_TELEGRAM_STATE || join(homedir(), '.codex-telegram-topic-sync.json');
+  const statePath = env.CODEX_TOOLBOX_STATE || env.CODEX_TELEGRAM_STATE || join(homedir(), '.codex-toolbox.json');
   const codexCommand = env.CODEX_APP_SERVER_COMMAND || 'codex';
   const codexArgs = splitArgs(env.CODEX_APP_SERVER_ARGS || 'app-server proxy');
   const pollMs = Number(env.CODEX_TELEGRAM_POLL_MS || 5000);

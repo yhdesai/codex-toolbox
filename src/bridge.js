@@ -202,7 +202,7 @@ export class CodexTelegramTopicBridge {
       chatId: message.chat.id,
       messageThreadId: message.message_thread_id,
       text: [
-        'Codex Telegram sync commands',
+        'Codex Toolbox commands',
         '/bind - bind this forum group',
         '/new Optional title - create a Codex thread and topic',
         '/topics - list mapped Codex topics',
@@ -242,7 +242,7 @@ export class CodexTelegramTopicBridge {
     const cooldownMs = Math.max(0, this.topicCreationPausedUntilMs - Date.now());
     const recentErrors = this.#recentErrors().slice(-3);
     const lines = [
-      'Codex Telegram sync status',
+      'Codex Toolbox status',
       `Bound group: ${this.state.boundChatId ?? 'not bound'}`,
       `Mirroring paused: ${this.state.data.paused?.mirroring ? 'yes' : 'no'}`,
       `Mapped threads: ${mappedThreadCount}`,
@@ -621,12 +621,14 @@ export class CodexTelegramTopicBridge {
 
   async #readDiagnostics() {
     const sections = [
-      'Codex Telegram sync diagnostics',
+      'Codex Toolbox diagnostics',
       `Mirroring paused: ${this.state.data.paused?.mirroring ? 'yes' : 'no'}`,
       `Mapped topics: ${Object.keys(this.state.data?.topics ?? {}).length}`,
       `Recent errors: ${this.#recentErrors().slice(-5).join(' | ') || 'none'}`,
     ];
     const logPaths = [
+      join(homedir(), '.pm2/logs/codex-toolbox-out.log'),
+      join(homedir(), '.pm2/logs/codex-toolbox-error.log'),
       join(homedir(), '.pm2/logs/codex-telegram-topic-sync-out.log'),
       join(homedir(), '.pm2/logs/codex-telegram-topic-sync-error.log'),
     ];
