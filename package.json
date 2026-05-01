@@ -1,0 +1,17 @@
+{
+  "name": "codex-telegram-topic-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bridge Codex app-server desktop sessions into Telegram forum topics.",
+  "bin": {
+    "codex-telegram-topic-sync": "./bin/codex-telegram-topic-sync.js"
+  },
+  "scripts": {
+    "start": "node ./bin/codex-telegram-topic-sync.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
