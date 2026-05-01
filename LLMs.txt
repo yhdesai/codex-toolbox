@@ -1,0 +1,198 @@
+# Codex Telegram Topic Sync: Agent Setup Notes
+
+This repository contains a Node.js bridge that mirrors Codex app-server threads into a Telegram forum group. Use this file when an AI agent needs to install, configure, run, or debug the app in a fresh Codex instance.
+
+## What The App Does
+
+- Connects to Codex app-server over JSON-RPC.
+- Polls Codex threads and maps each active/new thread to one Telegram forum topic.
+- Sends human-readable Codex messages into Telegram.
+- Routes Telegram replies from allowlisted users back into the mapped Codex thread.
+- Posts Codex approval requests with Telegram inline approve/decline/cancel buttons.
+- Tails Codex CLI session JSONL files for CLI-created sessions that do not stream live app-server item events to this bridge process.
+
+## Files To Read First
+
+- `README.md`: end-user setup and command reference.
+- `src/index.js`: environment configuration and app entrypoint wiring.
+- `src/bridge.js`: main orchestration, Telegram commands, topic mapping, CLI file tailing, mirroring policy calls.
+- `src/codex-app-server.js`: Codex app-server JSON-RPC client wrapper.
+- `src/telegram.js`: Telegram Bot API wrapper.
+- `src/state.js`: local JSON state file.
+- `test/bridge.test.js`: expected command and mirroring behavior.
+
+## Required Runtime Inputs
+
+Never invent, print, or commit real secrets. Ask the user to provide these through environment variables or their process manager:
+
+```sh
+TELEGRAM_BOT_TOKEN=replace-me
+TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id>[,<telegram-user-id>]
+```
+
+Optional environment:
+
+```sh
+CODEX_APP_SERVER_COMMAND=codex
+CODEX_APP_SERVER_ARGS="app-server proxy"
+CODEX_APP_SERVER_CWD=/path/to/workspace
+CODEX_TELEGRAM_STATE=~/.codex-telegram-topic-sync.json
+CODEX_TELEGRAM_POLL_MS=5000
+```
+
+If `codex app-server proxy` does not initialize, retry with:
+
+```sh
+CODEX_APP_SERVER_ARGS="app-server"
+```
+
+## Fresh Setup Procedure
+
+1. Verify Node.js and Codex CLI:
+
+```sh
+node --version
+codex --version
+```
+
+2. Install dependencies:
+
+```sh
+npm install
+```
+
+3. Run tests:
+
+```sh
+npm test
+```
+
+4. Start locally:
+
+```sh
+TELEGRAM_BOT_TOKEN=replace-me \
+TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id> \
+npm start
+```
+
+5. In the Telegram forum group, send:
+
+```text
+/bind
+```
+
+6. Create or discover a thread:
+
+```text
+/new Test thread
+```
+
+Then send a Telegram reply inside the new topic and confirm it reaches Codex.
+
+## PM2 Setup
+
+Use PM2 for a persistent background bridge:
+
+```sh
+npm install -g pm2
+
+TELEGRAM_BOT_TOKEN=replace-me \
+TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id> \
+CODEX_APP_SERVER_ARGS="app-server proxy" \
+pm2 start bin/codex-telegram-topic-sync.js --name codex-telegram-topic-sync --update-env
+
+pm2 save
+```
+
+Restart after env or code changes:
+
+```sh
+TELEGRAM_BOT_TOKEN=replace-me \
+TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id> \
+CODEX_APP_SERVER_ARGS="app-server proxy" \
+pm2 restart codex-telegram-topic-sync --update-env
+
+pm2 save
+```
+
+## Telegram Requirements
+
+- Destination must be a supergroup with forum topics enabled.
+- Bot must be admin.
+- Bot needs permission to create/manage topics and send messages.
+- Group is bound at runtime with `/bind`; do not hardcode the group id.
+
+## Command Reference
+
+- `/bind`: bind current forum group.
+- `/help`: list commands.
+- `/new Optional title`: create Codex thread and Telegram topic.
+- `/topics`: list mappings.
+- `/delete_all_topics confirm`: delete Codex-mapped Telegram topics and clear mappings.
+- `/unlink`: remove current topic mapping without deleting the topic.
+- `/relink <threadId>`: map current topic to an existing Codex thread.
+- `/resync`: force thread discovery.
+- `/pause`: pause Codex-to-Telegram mirroring only.
+- `/resume`: resume mirroring and discover threads.
+- `/rename <title>`: rename current topic and attempt Codex thread rename.
+- `/interrupt`: interrupt current mapped Codex thread.
+- `/status`: show diagnostics.
+- `/logs`: show redacted diagnostics and PM2 log tails.
+
+## Public Repo Safety
+
+Before committing or pushing, run:
+
+```sh
+rg -n "TELEGRAM_BOT_TOKEN='|[0-9]{6,}:[A-Za-z0-9_-]{20,}|/home/|boundChatId|-100[0-9]+" .
+npm test
+```
+
+Do not commit:
+
+- Real Telegram bot tokens.
+- Real Telegram user ids unless the user explicitly wants examples containing them.
+- `~/.codex-telegram-topic-sync.json`.
+- PM2 logs.
+- Codex session JSONL files.
+- Local absolute paths from a user's machine.
+
+Use placeholders in docs:
+
+```sh
+TELEGRAM_BOT_TOKEN=replace-me
+TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id>
+```
+
+## Important Implementation Details
+
+- Default allowlist is empty. If `TELEGRAM_ALLOWED_USER_IDS` is not set, no Telegram user can control the bridge.
+- Unauthorized normal Telegram text is ignored silently.
+- Unauthorized approval callbacks are answered with a denial callback message.
+- Telegram-originated messages are suppresssed when app-server emits the corresponding Codex user message, to avoid echoing user input back into the topic.
+- Assistant deltas are buffered until `item/completed`.
+- Existing mapped CLI sessions start file tailing at EOF to avoid backfilling old history.
+- Newly discovered CLI sessions start file tailing at byte 0 so the first CLI prompt and answer can appear in the newly created topic.
+- `/delete_all_topics confirm` can only delete topics known in local bridge state; Telegram bots cannot enumerate arbitrary forum topics.
+
+## Useful Diagnostics
+
+```sh
+pm2 list
+pm2 logs codex-telegram-topic-sync --lines 120 --nostream
+sed -n '1,220p' ~/.codex-telegram-topic-sync.json
+npm test
+```
+
+Probe app-server direct stdio:
+
+```sh
+node -e "const {spawn}=require('child_process'); const cp=spawn('codex',['app-server'],{stdio:['pipe','pipe','pipe']}); cp.stdout.on('data',d=>console.log(d.toString())); cp.stderr.on('data',d=>console.error(d.toString())); cp.stdin.write(JSON.stringify({id:1,method:'initialize',params:{clientInfo:{name:'probe',title:null,version:'0'},capabilities:{experimentalApi:true}}})+'\\n'); setTimeout(()=>cp.kill(),5000)"
+```
+
+## Common Fixes
+
+- Topic creation denied: make bot a Telegram group admin with topic management permissions, then run `/bind` again.
+- App-server proxy timeout: run with `CODEX_APP_SERVER_ARGS="app-server"`.
+- Messages from Telegram ignored: verify sender id is in `TELEGRAM_ALLOWED_USER_IDS`.
+- CLI messages not mirrored: run `/resync`, then check `thread/list` returns `path` for the CLI thread and that the session JSONL file is readable by the bridge process.
