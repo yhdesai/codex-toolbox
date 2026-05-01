@@ -56,3 +56,25 @@ test('persists ops metadata and mapping cleanup helpers', async () => {
   assert.deepEqual(Object.keys(loaded.data.approvals), []);
   assert.equal(loaded.data.lastErrors.at(-1).message, 'second');
 });
+
+test('persists Discord guild, project, and channel mappings', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-state-'));
+  const file = join(dir, 'state.json');
+  const state = await BridgeState.load(file);
+
+  await state.bindDiscordGuild('guild-1');
+  await state.mapDiscordProject('project-a', 'cat-1');
+  await state.mapDiscordThread('thread-a', 'chan-1', 'cat-1', 'Thread A');
+
+  assert.equal(state.getDiscordChannelForThread('thread-a'), 'chan-1');
+  assert.equal(state.getDiscordThreadForChannel('chan-1'), 'thread-a');
+
+  const loaded = await BridgeState.load(file);
+  assert.equal(loaded.data.discord.guildId, 'guild-1');
+  assert.equal(loaded.data.discord.projects['project-a'].categoryId, 'cat-1');
+  assert.equal(loaded.getDiscordChannelForThread('thread-a'), 'chan-1');
+
+  const unmapped = await loaded.unmapDiscordChannel('chan-1');
+  assert.equal(unmapped.threadId, 'thread-a');
+  assert.equal(loaded.getDiscordChannelForThread('thread-a'), null);
+});

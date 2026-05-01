@@ -12,6 +12,7 @@ export class BridgeState {
       paused: { mirroring: false },
       deletedThreadBaselines: {},
       lastErrors: [],
+      discord: { guildId: null, projects: {}, threads: {}, channels: {} },
     };
   }
 
@@ -32,6 +33,11 @@ export class BridgeState {
 
   async bindChat(chatId) {
     this.data.boundChatId = String(chatId);
+    await this.save();
+  }
+
+  async bindDiscordGuild(guildId) {
+    this.data.discord.guildId = String(guildId);
     await this.save();
   }
 
@@ -61,6 +67,56 @@ export class BridgeState {
       threadId: threadKey,
     };
     await this.save();
+  }
+
+  getDiscordChannelForThread(threadId) {
+    return this.data.discord.threads[String(threadId)]?.channelId ?? null;
+  }
+
+  getDiscordThreadForChannel(channelId) {
+    return this.data.discord.channels[String(channelId)]?.threadId ?? null;
+  }
+
+  async mapDiscordProject(projectName, categoryId) {
+    this.data.discord.projects[String(projectName)] = {
+      projectName: String(projectName),
+      categoryId: String(categoryId),
+      updatedAt: new Date().toISOString(),
+    };
+    await this.save();
+  }
+
+  async mapDiscordThread(threadId, channelId, categoryId, title = null) {
+    const threadKey = String(threadId);
+    const channelKey = String(channelId);
+    this.data.discord.threads[threadKey] = {
+      threadId: threadKey,
+      channelId: channelKey,
+      categoryId: categoryId == null ? null : String(categoryId),
+      title,
+      updatedAt: new Date().toISOString(),
+    };
+    this.data.discord.channels[channelKey] = {
+      channelId: channelKey,
+      threadId: threadKey,
+    };
+    await this.save();
+  }
+
+  async unmapDiscordThread(threadId) {
+    const threadKey = String(threadId);
+    const mapping = this.data.discord.threads[threadKey];
+    if (!mapping) return null;
+    delete this.data.discord.threads[threadKey];
+    delete this.data.discord.channels[String(mapping.channelId)];
+    await this.save();
+    return mapping;
+  }
+
+  async unmapDiscordChannel(channelId) {
+    const mapping = this.data.discord.channels[String(channelId)];
+    if (!mapping) return null;
+    return this.unmapDiscordThread(mapping.threadId);
   }
 
   async updateThreadTitle(threadId, title) {
@@ -159,5 +215,11 @@ function normalizeState(value) {
     },
     deletedThreadBaselines: value?.deletedThreadBaselines && typeof value.deletedThreadBaselines === 'object' ? value.deletedThreadBaselines : {},
     lastErrors: Array.isArray(value?.lastErrors) ? value.lastErrors.slice(-20) : [],
+    discord: {
+      guildId: value?.discord?.guildId == null ? null : String(value.discord.guildId),
+      projects: value?.discord?.projects && typeof value.discord.projects === 'object' ? value.discord.projects : {},
+      threads: value?.discord?.threads && typeof value.discord.threads === 'object' ? value.discord.threads : {},
+      channels: value?.discord?.channels && typeof value.discord.channels === 'object' ? value.discord.channels : {},
+    },
   };
 }

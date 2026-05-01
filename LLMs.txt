@@ -1,16 +1,16 @@
 # Codex Toolbox: Agent Setup Notes
 
-This repository contains a Node.js bridge that mirrors Codex app-server threads into a Telegram forum group. Use this file when an AI agent needs to install, configure, run, or debug the app in a fresh Codex instance.
+This repository contains a Node.js bridge that mirrors Codex app-server threads into Telegram forum topics or Discord project channels. Use this file when an AI agent needs to install, configure, run, or debug the app in a fresh Codex instance.
 
 Repository URL: https://github.com/yhdesai/codex-toolbox
 
 ## What The App Does
 
 - Connects to Codex app-server over JSON-RPC.
-- Polls Codex threads and maps each active/new thread to one Telegram forum topic.
-- Sends human-readable Codex messages into Telegram.
-- Routes Telegram replies from allowlisted users back into the mapped Codex thread.
-- Posts Codex approval requests with Telegram inline approve/decline/cancel buttons.
+- Polls Codex threads and maps each active/new thread to one Telegram forum topic or one Discord text channel.
+- Sends human-readable Codex messages into Telegram or Discord.
+- Routes Telegram/Discord replies from allowlisted users back into the mapped Codex thread.
+- Posts Codex approval requests with inline approve/decline/cancel buttons.
 - Tails Codex CLI session JSONL files for CLI-created sessions that do not stream live app-server item events to this bridge process.
 
 ## Files To Read First
@@ -18,10 +18,13 @@ Repository URL: https://github.com/yhdesai/codex-toolbox
 - `README.md`: end-user setup and command reference.
 - `src/index.js`: environment configuration and app entrypoint wiring.
 - `src/bridge.js`: main orchestration, Telegram commands, topic mapping, CLI file tailing, mirroring policy calls.
+- `src/discord-bridge.js`: Discord orchestration, project category/channel mapping, commands, and approval callbacks.
 - `src/codex-app-server.js`: Codex app-server JSON-RPC client wrapper.
 - `src/telegram.js`: Telegram Bot API wrapper.
+- `src/discord.js`: Discord REST and Gateway wrapper.
 - `src/state.js`: local JSON state file.
 - `test/bridge.test.js`: expected command and mirroring behavior.
+- `test/discord-bridge.test.js`: expected Discord command and mirroring behavior.
 
 ## Required Runtime Inputs
 
@@ -32,6 +35,14 @@ TELEGRAM_BOT_TOKEN=replace-me
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id>[,<telegram-user-id>]
 ```
 
+For Discord:
+
+```sh
+DISCORD_BOT_TOKEN=replace-me
+DISCORD_ALLOWED_USER_IDS=<discord-user-id>[,<discord-user-id>]
+CODEX_SYNC_PROVIDER=discord
+```
+
 Optional environment:
 
 ```sh
@@ -40,6 +51,8 @@ CODEX_APP_SERVER_ARGS="app-server proxy"
 CODEX_APP_SERVER_CWD=/path/to/workspace
 CODEX_TOOLBOX_STATE=~/.codex-toolbox.json
 CODEX_TELEGRAM_POLL_MS=5000
+DISCORD_PROJECT_NAME=workspace-folder-name
+DISCORD_COMMAND_PREFIX=!codex
 ```
 
 If `codex app-server proxy` does not initialize, retry with:
@@ -69,11 +82,20 @@ npm install
 npm test
 ```
 
-4. Start locally:
+4. Start locally for Telegram:
 
 ```sh
 TELEGRAM_BOT_TOKEN=replace-me \
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id> \
+npm start
+```
+
+For Discord:
+
+```sh
+DISCORD_BOT_TOKEN=replace-me \
+DISCORD_ALLOWED_USER_IDS=<discord-user-id> \
+CODEX_SYNC_PROVIDER=discord \
 npm start
 ```
 
@@ -90,6 +112,15 @@ npm start
 ```
 
 Then send a Telegram reply inside the new topic and confirm it reaches Codex.
+
+For Discord, invite the bot to the server with Message Content Intent enabled and permissions for `Manage Channels`, `View Channels`, `Send Messages`, and `Read Message History`. Run:
+
+```text
+!codex bind
+!codex new Test thread
+```
+
+Then send a Discord message inside the created channel and confirm it reaches Codex.
 
 ## PM2 Setup
 
@@ -117,12 +148,33 @@ pm2 restart codex-toolbox --update-env
 pm2 save
 ```
 
+Discord PM2 example:
+
+```sh
+DISCORD_BOT_TOKEN=replace-me \
+DISCORD_ALLOWED_USER_IDS=<discord-user-id> \
+CODEX_SYNC_PROVIDER=discord \
+DISCORD_PROJECT_NAME=codex-toolbox \
+CODEX_APP_SERVER_ARGS="app-server proxy" \
+pm2 start bin/codex-toolbox.js --name codex-toolbox-discord --update-env
+
+pm2 save
+```
+
 ## Telegram Requirements
 
 - Destination must be a supergroup with forum topics enabled.
 - Bot must be admin.
 - Bot needs permission to create/manage topics and send messages.
 - Group is bound at runtime with `/bind`; do not hardcode the group id.
+
+## Discord Requirements
+
+- Destination must be a Discord server where the bot is installed.
+- Enable Message Content Intent in the Discord Developer Portal.
+- Bot needs `Manage Channels`, `View Channels`, `Send Messages`, and `Read Message History`.
+- Server is bound at runtime with `!codex bind`; do not hardcode the guild id.
+- The project category defaults to the workspace folder name, or `DISCORD_PROJECT_NAME`.
 
 ## Command Reference
 
@@ -141,19 +193,33 @@ pm2 save
 - `/status`: show diagnostics.
 - `/logs`: show redacted diagnostics and PM2 log tails.
 
+Discord commands:
+
+- `!codex bind`: bind current Discord server and create/reuse the project category.
+- `!codex help`: list commands.
+- `!codex new Optional title`: create Codex thread and Discord channel.
+- `!codex status`: show diagnostics.
+- `!codex resync`: force thread discovery.
+- `!codex interrupt`: interrupt current mapped Codex thread.
+- `!codex unlink`: remove current channel mapping without deleting the channel.
+- `!codex relink <threadId>`: map current channel to an existing Codex thread.
+- `!codex delete_all_channels confirm`: delete Codex-mapped Discord channels and clear mappings.
+
 ## Public Repo Safety
 
 Before committing or pushing, run:
 
 ```sh
-rg -n "TELEGRAM_BOT_TOKEN='|[0-9]{6,}:[A-Za-z0-9_-]{20,}|/home/|boundChatId|-100[0-9]+" .
+rg -n "TELEGRAM_BOT_TOKEN='|DISCORD_BOT_TOKEN='|[0-9]{6,}:[A-Za-z0-9_-]{20,}|/home/|boundChatId|-100[0-9]+" .
 npm test
 ```
 
 Do not commit:
 
 - Real Telegram bot tokens.
+- Real Discord bot tokens.
 - Real Telegram user ids unless the user explicitly wants examples containing them.
+- Real Discord user ids unless the user explicitly wants examples containing them.
 - `~/.codex-toolbox.json`.
 - PM2 logs.
 - Codex session JSONL files.
@@ -164,13 +230,17 @@ Use placeholders in docs:
 ```sh
 TELEGRAM_BOT_TOKEN=replace-me
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id>
+DISCORD_BOT_TOKEN=replace-me
+DISCORD_ALLOWED_USER_IDS=<discord-user-id>
 ```
 
 ## Important Implementation Details
 
-- Default allowlist is empty. If `TELEGRAM_ALLOWED_USER_IDS` is not set, no Telegram user can control the bridge.
+- Default allowlists are empty. If `TELEGRAM_ALLOWED_USER_IDS` or `DISCORD_ALLOWED_USER_IDS` is not set, no chat user can control that bridge.
 - Unauthorized normal Telegram text is ignored silently.
 - Unauthorized approval callbacks are answered with a denial callback message.
+- Discord non-`bind` commands are accepted only in the bound server.
+- Discord maps each project to a category and each Codex thread to a text channel under that category.
 - Telegram-originated messages are suppresssed when app-server emits the corresponding Codex user message, to avoid echoing user input back into the topic.
 - Assistant deltas are buffered until `item/completed`.
 - Existing mapped CLI sessions start file tailing at EOF to avoid backfilling old history.

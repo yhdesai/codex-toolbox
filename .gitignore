@@ -1,0 +1,4 @@
+node_modules/
+*.log
+.codex-toolbox.json
+.codex-telegram-topic-sync.json
