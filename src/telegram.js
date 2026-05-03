@@ -103,6 +103,10 @@ export class TelegramClient extends EventEmitter {
       ...(text ? { text } : {}),
     });
   }
+
+  async setMyCommands(commands) {
+    return this.api('setMyCommands', { commands });
+  }
 }
 
 export function isForumMessage(message) {

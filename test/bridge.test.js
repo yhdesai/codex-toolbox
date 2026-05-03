@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { appendFile, mkdtemp, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { promisify } from 'node:util';
 import { CodexTelegramTopicBridge } from '../src/bridge.js';
+
+const execFileAsync = promisify(execFile);
 
 test('/bind stores group without creating topics for existing discovered threads', async () => {
   const state = memoryState();
@@ -119,6 +123,31 @@ test('mapped CLI session files are tailed for new messages', async () => {
   await bridge.stop();
 
   assert.deepEqual(telegram.sent.map((message) => message.text), ['User\nfrom cli', 'Codex\nfrom assistant']);
+});
+
+test('CLI session tailing does not duplicate messages already mirrored from app-server events', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-cli-'));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, '', 'utf8');
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('cli-thread', 44, 'CLI');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex({ threads: [{ id: 'cli-thread', title: 'CLI', source: 'cli', path: file, updatedAt: '1' }] });
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  codex.emit('event', {
+    method: 'item/completed',
+    threadId: 'cli-thread',
+    raw: { params: { threadId: 'cli-thread', item: { id: 'agent-1', type: 'agentMessage', text: 'same answer' } } },
+  });
+  await tick();
+  await appendFile(file, `${sessionLine('agent_message', { message: 'same answer' })}\n`, 'utf8');
+  await bridge.discoverThreads();
+  await bridge.stop();
+
+  assert.deepEqual(telegram.sent.map((message) => message.text), ['Codex\nsame answer']);
 });
 
 test('newly discovered CLI session files mirror existing first turn after topic creation', async () => {
@@ -671,7 +700,7 @@ test('topic creation rate limits pause repeated topic creation attempts', async 
   assert.equal(state.getTopicForThread('old'), null);
 });
 
-test('/new creates a Codex thread and Telegram topic', async () => {
+test('/new without --cwd opens the project selector', async () => {
   const state = memoryState();
   await state.bindChat(-100);
   const telegram = fakeTelegram();
@@ -680,11 +709,13 @@ test('/new creates a Codex thread and Telegram topic', async () => {
 
   await bridge.start();
   telegram.emit('update', { message: allowedMessage({ text: '/new Investigate bug', chat: { id: -100, type: 'supergroup' } }) });
-  await tick();
+  await delay(100);
   await bridge.stop();
 
-  assert.deepEqual(codex.created[0], { title: 'Investigate bug', options: { cwd: null } });
-  assert.equal(state.getTopicForThread('new-thread'), 1001);
+  assert.deepEqual(codex.created, []);
+  assert.match(telegram.sent.at(-1).text, /Select a project/);
+  assert.ok(telegram.sent.at(-1).replyMarkup);
+  assert.equal(telegram.sent.at(-1).replyMarkup.inline_keyboard.at(-1)[0].text, 'Help');
 });
 
 test('/new accepts --cwd to start a Codex thread in a directory', async () => {
@@ -697,12 +728,77 @@ test('/new accepts --cwd to start a Codex thread in a directory', async () => {
 
   await bridge.start();
   telegram.emit('update', { message: allowedMessage({ text: `/new --cwd "${dir}" Investigate bug`, chat: { id: -100, type: 'supergroup' } }) });
-  await delay(10);
+  await delay(50);
   await bridge.stop();
 
   assert.deepEqual(codex.created[0], { title: 'Investigate bug', options: { cwd: dir } });
   assert.equal(state.getTopicForThread('new-thread'), 1001);
   assert.match(telegram.sent.at(-1).text, new RegExp(`Directory: ${escapeRegex(dir)}`));
+});
+
+test('/new project and worktree callbacks create a Codex thread in the selected worktree', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-projects-'));
+  const root = join(dir, 'projects-shiprdev');
+  const worktree = join(root, 'omniflow', 'main');
+  await mkdir(worktree, { recursive: true });
+  await execGit(['init'], worktree);
+  const previousRoot = process.env.CODEX_PROJECTS_ROOT;
+  process.env.CODEX_PROJECTS_ROOT = root;
+  const state = memoryState();
+  await state.bindChat(-100);
+  const telegram = fakeTelegram();
+  const codex = fakeCodex();
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  try {
+    await bridge.start();
+    telegram.emit('update', { message: allowedMessage({ text: '/new Investigate bug', chat: { id: -100, type: 'supergroup' } }) });
+    await delay(20);
+    const projectCallback = telegram.sent.at(-1).replyMarkup.inline_keyboard[0][0].callback_data;
+    telegram.emit('update', { callback_query: { id: 'project-cb', from: { id: 111111111 }, data: projectCallback } });
+    await delay(20);
+    const worktreeCallback = telegram.sent.at(-1).replyMarkup.inline_keyboard[0][0].callback_data;
+    telegram.emit('update', { callback_query: { id: 'worktree-cb', from: { id: 111111111 }, data: worktreeCallback } });
+    await delay(20);
+    await bridge.stop();
+  } finally {
+    if (previousRoot == null) delete process.env.CODEX_PROJECTS_ROOT;
+    else process.env.CODEX_PROJECTS_ROOT = previousRoot;
+  }
+
+  assert.deepEqual(codex.created[0], { title: 'Investigate bug', options: { cwd: worktree } });
+  assert.equal(state.getTopicForThread('new-thread'), 1001);
+});
+
+test('startup registers Telegram command menu when supported', async () => {
+  const state = memoryState();
+  const telegram = fakeTelegram();
+  const codex = fakeCodex();
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  await bridge.stop();
+
+  assert.deepEqual(telegram.commands.map((command) => command.command), ['new', 'topics', 'status', 'interrupt', 'rename', 'pause', 'resume', 'help']);
+});
+
+test('/new inline help callback sends help text', async () => {
+  const state = memoryState();
+  await state.bindChat(-100);
+  const telegram = fakeTelegram();
+  const codex = fakeCodex();
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  telegram.emit('update', { message: allowedMessage({ text: '/new', chat: { id: -100, type: 'supergroup' } }) });
+  await delay(100);
+  const helpCallback = telegram.sent.at(-1).replyMarkup.inline_keyboard.at(-1)[0].callback_data;
+  telegram.emit('update', { callback_query: { id: 'help-cb', from: { id: 111111111 }, data: helpCallback } });
+  await delay(20);
+  await bridge.stop();
+
+  assert.match(telegram.sent.at(-1).text, /Codex Toolbox commands/);
+  assert.match(telegram.sent.at(-1).text, /\/new Optional title/);
 });
 
 test('/new rejects missing or relative cwd values', async () => {
@@ -835,6 +931,7 @@ function fakeTelegram() {
   telegram.deleted = [];
   telegram.edited = [];
   telegram.callbackAnswers = [];
+  telegram.commands = [];
   telegram.startPolling = async () => {};
   telegram.stopPolling = () => {};
   telegram.createForumTopic = async (chatId, title) => {
@@ -852,6 +949,9 @@ function fakeTelegram() {
   };
   telegram.answerCallbackQuery = async (id, text) => {
     telegram.callbackAnswers.push({ id, text });
+  };
+  telegram.setMyCommands = async (commands) => {
+    telegram.commands = commands;
   };
   return telegram;
 }
@@ -936,6 +1036,10 @@ function escapeRegex(value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function execGit(args, cwd) {
+  await execFileAsync('git', args, { cwd });
 }
 
 function sessionLine(type, payload) {

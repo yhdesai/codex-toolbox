@@ -1,13 +1,29 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { approvalKeyboard, getCommand, isForumMessage } from './telegram.js';
 import { approvalLabels, extractUserMessageText, renderApprovalPrompt, renderCodexEvent } from './mirror-policy.js';
 
 const TELEGRAM_ECHO_SUPPRESSION_MS = 2 * 60 * 1000;
+const MIRROR_DEDUPE_MS = 5 * 60 * 1000;
 const PM2_LOG_LINES = 40;
 const GLOBAL_ECHO_SUPPRESSION_KEY = '*';
+const DEFAULT_PROJECTS_ROOT = join(homedir(), 'projects-shiprdev');
+const NEW_THREAD_SELECTION_TTL_MS = 15 * 60 * 1000;
+const execFileAsync = promisify(execFile);
+const TELEGRAM_COMMANDS = [
+  { command: 'new', description: 'Create a Codex topic' },
+  { command: 'topics', description: 'List mapped Codex topics' },
+  { command: 'status', description: 'Show bridge status' },
+  { command: 'interrupt', description: 'Interrupt the current Codex turn' },
+  { command: 'rename', description: 'Rename this topic' },
+  { command: 'pause', description: 'Pause Codex-to-Telegram mirroring' },
+  { command: 'resume', description: 'Resume mirroring' },
+  { command: 'help', description: 'Show commands and workflow' },
+];
 
 export class CodexTelegramTopicBridge {
   constructor({ codex, telegram, state, pollMs = 5000, logger = console, allowedUserIds = [] }) {
@@ -28,9 +44,12 @@ export class CodexTelegramTopicBridge {
     this.startedAtMs = Date.now();
     this.agentMessageBuffers = new Map();
     this.telegramEchoSuppressions = new Map();
+    this.recentMirroredMessages = new Map();
     this.lastDiscoveryStats = { seen: 0, created: 0, resumed: 0, skipped: 0 };
     this.sessionFilePaths = new Map();
     this.sessionFileOffsets = new Map();
+    this.newThreadSelections = new Map();
+    this.pendingWorktreeCreates = new Map();
   }
 
   async start() {
@@ -48,6 +67,7 @@ export class CodexTelegramTopicBridge {
     });
 
     await this.codex.start();
+    await this.#installTelegramCommandMenu();
     await this.discoverThreads();
     this.discoveryTimer = setInterval(() => this.discoverThreads().catch((error) => this.#logError(error)), this.pollMs);
     this.telegram.startPolling().catch((error) => this.#logError(error));
@@ -184,6 +204,9 @@ export class CodexTelegramTopicBridge {
       await this.#interrupt(message);
       return;
     }
+    if (await this.#handlePendingWorktreeCreate(message)) {
+      return;
+    }
     await this.#routeTopicReply(message);
   }
 
@@ -201,22 +224,7 @@ export class CodexTelegramTopicBridge {
     await this.telegram.sendMessage({
       chatId: message.chat.id,
       messageThreadId: message.message_thread_id,
-      text: [
-        'Codex Toolbox commands',
-        '/bind - bind this forum group',
-        '/new [--cwd /path] Optional title - create a Codex thread and topic',
-        '/topics - list mapped Codex topics',
-        '/delete_all_topics confirm - delete all Codex-mapped topics',
-        '/unlink - remove mapping for this topic',
-        '/relink <threadId> - link this topic to a Codex thread',
-        '/resync - run discovery now',
-        '/pause - pause Codex-to-Telegram mirroring',
-        '/resume - resume mirroring',
-        '/rename <title> - rename this topic and Codex thread',
-        '/interrupt - interrupt this Codex thread',
-        '/status - show bridge status',
-        '/logs - show redacted diagnostics',
-      ].join('\n'),
+      text: helpText(),
     });
   }
 
@@ -230,18 +238,16 @@ export class CodexTelegramTopicBridge {
       await this.telegram.sendMessage({ chatId: message.chat.id, messageThreadId: message.message_thread_id, text: parsed.error });
       return;
     }
-    const cwd = parsed.cwd ? await resolveExistingDirectory(parsed.cwd) : null;
+    if (!parsed.cwd) {
+      await this.#showProjectPicker(message, parsed.title);
+      return;
+    }
+    const cwd = await resolveExistingDirectory(parsed.cwd);
     if (parsed.cwd && !cwd) {
       await this.telegram.sendMessage({ chatId: message.chat.id, messageThreadId: message.message_thread_id, text: `Directory not found or not a directory: ${parsed.cwd}` });
       return;
     }
-    const title = parsed.title || (cwd ? cwd.split('/').filter(Boolean).at(-1) : null) || 'Telegram thread';
-    const threadId = await this.codex.createThread(title, { cwd });
-    const topicId = await this.telegram.createForumTopic(this.state.boundChatId, title);
-    await this.state.mapThread(threadId, topicId, title);
-    await this.codex.resumeThread(threadId);
-    this.subscribedThreads.add(String(threadId));
-    await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId: topicId, text: `Created Codex thread ${threadId}${cwd ? `\nDirectory: ${cwd}` : ''}` });
+    await this.#createThreadAndTopic({ title: parsed.title || basename(cwd), cwd });
   }
 
   async #status(message) {
@@ -467,6 +473,10 @@ export class CodexTelegramTopicBridge {
 
   async #handleCallback(callback) {
     const data = callback.data ?? '';
+    if (data.startsWith('new:')) {
+      await this.#handleNewThreadCallback(callback);
+      return;
+    }
     if (!data.startsWith('approval:')) return;
     const [, callbackId, decision] = data.split(':');
     const approval = await this.state.takeApproval(callbackId);
@@ -478,6 +488,189 @@ export class CodexTelegramTopicBridge {
     await this.telegram.answerCallbackQuery(callback.id, `Sent ${decision}.`);
   }
 
+  async #showProjectPicker(message, title) {
+    const projects = await listProjects();
+    if (!projects.length) {
+      await this.telegram.sendMessage({
+        chatId: message.chat.id,
+        messageThreadId: message.message_thread_id,
+        text: `No projects found in ${projectsRoot()}.`,
+      });
+      return;
+    }
+    const selectionId = this.#rememberNewThreadSelection({
+      chatId: message.chat.id,
+      messageThreadId: message.message_thread_id,
+      title,
+    });
+    await this.telegram.sendMessage({
+      chatId: message.chat.id,
+      messageThreadId: message.message_thread_id,
+      text: 'Select a project for the new Codex session.',
+      replyMarkup: inlineKeyboard([
+        ...projects.map((project) => ({
+          text: project.name,
+          callback_data: `new:project:${selectionId}:${project.index}`,
+        })),
+        { text: 'Help', callback_data: `new:help:${selectionId}` },
+      ]),
+    });
+  }
+
+  async #showWorktreePicker(callback, selection, project) {
+    selection.project = project.name;
+    selection.projectPath = project.path;
+    const worktrees = await listWorktrees(project.path);
+    const buttons = worktrees.map((worktree) => ({
+      text: worktree.name,
+      callback_data: `new:worktree:${selection.id}:${worktree.index}`,
+    }));
+    buttons.push({ text: 'Create new worktree', callback_data: `new:create-worktree:${selection.id}` });
+    buttons.push({ text: 'Help', callback_data: `new:help:${selection.id}` });
+    await this.telegram.sendMessage({
+      chatId: selection.chatId,
+      messageThreadId: selection.messageThreadId,
+      text: `Project: ${project.name}\nSelect a worktree.`,
+      replyMarkup: inlineKeyboard(buttons),
+    });
+    await this.telegram.answerCallbackQuery(callback.id, 'Project selected.');
+  }
+
+  async #handleNewThreadCallback(callback) {
+    const parts = String(callback.data ?? '').split(':');
+    const action = parts[1];
+    const selectionId = parts[2];
+    const selection = this.#getNewThreadSelection(selectionId);
+    if (!selection) {
+      await this.telegram.answerCallbackQuery(callback.id, 'This /new selection expired. Run /new again.');
+      return;
+    }
+    if (action === 'project') {
+      const projects = await listProjects();
+      const project = projects[Number(parts[3])];
+      if (!project) {
+        await this.telegram.answerCallbackQuery(callback.id, 'Project was not found.');
+        return;
+      }
+      await this.#showWorktreePicker(callback, selection, project);
+      return;
+    }
+    if (action === 'worktree') {
+      const worktrees = await listWorktrees(selection.projectPath);
+      const worktree = worktrees[Number(parts[3])];
+      if (!worktree) {
+        await this.telegram.answerCallbackQuery(callback.id, 'Worktree was not found.');
+        return;
+      }
+      await this.telegram.answerCallbackQuery(callback.id, 'Creating Codex topic.');
+      await this.#createThreadAndTopic({
+        title: selection.title || `${selection.project}/${worktree.name}`,
+        cwd: worktree.path,
+      });
+      this.newThreadSelections.delete(selection.id);
+      return;
+    }
+    if (action === 'create-worktree') {
+      const key = pendingWorktreeKey(callback.from, selection.chatId);
+      this.pendingWorktreeCreates.set(key, { ...selection, createdAt: Date.now() });
+      await this.telegram.answerCallbackQuery(callback.id, 'Send the new worktree name.');
+      await this.telegram.sendMessage({
+        chatId: selection.chatId,
+        messageThreadId: selection.messageThreadId,
+        text: `Send the new worktree folder name for ${selection.project}.`,
+      });
+      return;
+    }
+    if (action === 'help') {
+      await this.telegram.answerCallbackQuery(callback.id, 'Help opened.');
+      await this.telegram.sendMessage({
+        chatId: selection.chatId,
+        messageThreadId: selection.messageThreadId,
+        text: helpText(),
+      });
+    }
+  }
+
+  async #installTelegramCommandMenu() {
+    if (typeof this.telegram.setMyCommands !== 'function') return;
+    try {
+      await this.telegram.setMyCommands(TELEGRAM_COMMANDS);
+    } catch (error) {
+      await this.#rememberError(`set Telegram commands: ${error.message}`);
+      this.logger.warn?.('Could not set Telegram command menu:', error.message);
+    }
+  }
+
+  async #handlePendingWorktreeCreate(message) {
+    const key = pendingWorktreeKey(message.from, message.chat.id);
+    const pending = this.pendingWorktreeCreates.get(key);
+    if (!pending) return false;
+    if (Date.now() - pending.createdAt > NEW_THREAD_SELECTION_TTL_MS) {
+      this.pendingWorktreeCreates.delete(key);
+      await this.telegram.sendMessage({ chatId: message.chat.id, messageThreadId: message.message_thread_id, text: 'That worktree prompt expired. Run /new again.' });
+      return true;
+    }
+    const name = sanitizeWorktreeName(message.text);
+    if (!name) {
+      await this.telegram.sendMessage({ chatId: message.chat.id, messageThreadId: message.message_thread_id, text: 'Use letters, numbers, dots, dashes, and underscores for the worktree folder name.' });
+      return true;
+    }
+    const cwd = join(pending.projectPath, name);
+    const existing = await resolveExistingDirectory(cwd);
+    if (existing) {
+      this.pendingWorktreeCreates.delete(key);
+      await this.#createThreadAndTopic({ title: pending.title || `${pending.project}/${name}`, cwd: existing });
+      return true;
+    }
+    try {
+      await createGitWorktree(pending.projectPath, name);
+    } catch (error) {
+      await this.telegram.sendMessage({ chatId: message.chat.id, messageThreadId: message.message_thread_id, text: `Could not create worktree "${name}": ${error.message}` });
+      return true;
+    }
+    this.pendingWorktreeCreates.delete(key);
+    this.newThreadSelections.delete(pending.id);
+    await this.telegram.sendMessage({
+      chatId: message.chat.id,
+      messageThreadId: message.message_thread_id,
+      text: `Created worktree "${name}".\nDirectory: ${cwd}`,
+    });
+    await this.#createThreadAndTopic({ title: pending.title || `${pending.project}/${name}`, cwd });
+    return true;
+  }
+
+  async #createThreadAndTopic({ title, cwd }) {
+    title = title || basename(cwd) || 'Telegram thread';
+    const threadId = await this.codex.createThread(title, { cwd });
+    const topicId = await this.telegram.createForumTopic(this.state.boundChatId, title);
+    await this.state.mapThread(threadId, topicId, title);
+    await this.codex.resumeThread(threadId);
+    this.subscribedThreads.add(String(threadId));
+    await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId: topicId, text: `Created Codex thread ${threadId}\nDirectory: ${cwd}` });
+  }
+
+  #rememberNewThreadSelection(selection) {
+    this.#pruneNewThreadSelections();
+    const id = randomUUID().slice(0, 8);
+    this.newThreadSelections.set(id, { id, ...selection, createdAt: Date.now() });
+    return id;
+  }
+
+  #getNewThreadSelection(id) {
+    this.#pruneNewThreadSelections();
+    return this.newThreadSelections.get(id) ?? null;
+  }
+
+  #pruneNewThreadSelections() {
+    const now = Date.now();
+    for (const [id, selection] of this.newThreadSelections.entries()) {
+      if (now - selection.createdAt > NEW_THREAD_SELECTION_TTL_MS) this.newThreadSelections.delete(id);
+    }
+    for (const [key, pending] of this.pendingWorktreeCreates.entries()) {
+      if (now - pending.createdAt > NEW_THREAD_SELECTION_TTL_MS) this.pendingWorktreeCreates.delete(key);
+    }
+  }
+
   async #mirrorCodexEvent(event) {
     if (!this.state.boundChatId || !event.threadId) return;
     if (this.#consumeTelegramEchoSuppression(event)) return;
@@ -487,14 +680,14 @@ export class CodexTelegramTopicBridge {
     if (completedBufferedText) {
       const messageThreadId = await this.#ensureTopicForThread(event.threadId);
       if (!messageThreadId) return;
-      await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text: completedBufferedText });
+      await this.#sendMirroredMessage(event.threadId, messageThreadId, completedBufferedText);
       return;
     }
     const text = renderCodexEvent(event);
     if (!text) return;
     const messageThreadId = await this.#ensureTopicForThread(event.threadId);
     if (!messageThreadId) return;
-    await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text });
+    await this.#sendMirroredMessage(event.threadId, messageThreadId, text);
   }
 
   async #mirrorApprovalRequest(request) {
@@ -544,7 +737,7 @@ export class CodexTelegramTopicBridge {
       if (text.startsWith('User\n') && this.#consumeTextEchoSuppression(threadId, text.slice('User\n'.length))) continue;
       const messageThreadId = this.state.getTopicForThread(threadId);
       if (!messageThreadId) return;
-      await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text });
+      await this.#sendMirroredMessage(threadId, messageThreadId, text);
     }
   }
 
@@ -674,6 +867,25 @@ export class CodexTelegramTopicBridge {
     this.agentMessageBuffers.delete(String(item.id));
     const text = (buffered || item.text || '').trim();
     return text ? `Codex\n${text}` : null;
+  }
+
+  async #sendMirroredMessage(threadId, messageThreadId, text) {
+    if (this.#rememberMirroredMessage(threadId, text)) return;
+    await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text });
+  }
+
+  #rememberMirroredMessage(threadId, text) {
+    const normalizedText = normalizeText(text);
+    if (!normalizedText) return false;
+    const key = String(threadId);
+    const now = Date.now();
+    const recent = (this.recentMirroredMessages.get(key) ?? [])
+      .filter((entry) => now - entry.createdAt <= MIRROR_DEDUPE_MS);
+    const duplicate = recent.some((entry) => entry.text === normalizedText);
+    if (!duplicate) recent.push({ text: normalizedText, createdAt: now });
+    if (recent.length) this.recentMirroredMessages.set(key, recent);
+    else this.recentMirroredMessages.delete(key);
+    return duplicate;
   }
 
   #rememberTelegramEchoSuppression(threadId, text) {
@@ -841,6 +1053,109 @@ async function resolveExistingDirectory(value) {
   } catch {
     return null;
   }
+}
+
+async function listProjects() {
+  const root = projectsRoot();
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const projects = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'codex-sync') continue;
+    const projectPath = join(root, entry.name);
+    const worktrees = await listWorktrees(projectPath);
+    if (worktrees.length) projects.push({ name: entry.name, path: projectPath });
+  }
+  return projects
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((project, index) => ({ ...project, index }));
+}
+
+function projectsRoot() {
+  return process.env.CODEX_PROJECTS_ROOT || DEFAULT_PROJECTS_ROOT;
+}
+
+async function listWorktrees(projectPath) {
+  const entries = await readdir(projectPath, { withFileTypes: true }).catch(() => []);
+  const worktrees = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    const worktreePath = join(projectPath, entry.name);
+    if (await isGitWorktree(worktreePath)) worktrees.push({ name: entry.name, path: worktreePath });
+  }
+  return worktrees
+    .sort((a, b) => {
+      if (a.name === 'main') return -1;
+      if (b.name === 'main') return 1;
+      if (a.name === 'dev') return -1;
+      if (b.name === 'dev') return 1;
+      return a.name.localeCompare(b.name);
+    })
+    .map((worktree, index) => ({ ...worktree, index }));
+}
+
+async function isGitWorktree(dir) {
+  try {
+    await execFileAsync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function createGitWorktree(projectPath, name) {
+  const source = await findWorktreeSource(projectPath);
+  if (!source) throw new Error(`No existing git worktree found in ${projectPath}`);
+  const branch = name;
+  try {
+    await execFileAsync('git', ['-C', source, 'worktree', 'add', '-b', branch, join('..', name)], { timeout: 120000 });
+  } catch (error) {
+    const detail = String(error.stderr || error.stdout || error.message).trim();
+    throw new Error(detail || error.message);
+  }
+}
+
+async function findWorktreeSource(projectPath) {
+  const worktrees = await listWorktrees(projectPath);
+  return (worktrees.find((worktree) => worktree.name === 'main') ?? worktrees[0])?.path ?? null;
+}
+
+function inlineKeyboard(buttons) {
+  const rows = [];
+  for (let index = 0; index < buttons.length; index += 2) {
+    rows.push(buttons.slice(index, index + 2));
+  }
+  return { inline_keyboard: rows };
+}
+
+function pendingWorktreeKey(user, chatId) {
+  return `${chatId}:${user?.id ?? 'unknown'}`;
+}
+
+function helpText() {
+  return [
+    'Codex Toolbox commands',
+    '/bind - bind this forum group',
+    '/new Optional title - choose a project and worktree for a new Codex topic',
+    '/new --cwd /path Optional title - create a Codex thread from an exact directory',
+    '/topics - list mapped Codex topics',
+    '/delete_all_topics confirm - delete all Codex-mapped topics',
+    '/unlink - remove mapping for this topic',
+    '/relink <threadId> - link this topic to a Codex thread',
+    '/resync - run discovery now',
+    '/pause - pause Codex-to-Telegram mirroring',
+    '/resume - resume mirroring',
+    '/rename <title> - rename this topic and Codex thread',
+    '/interrupt - interrupt this Codex thread',
+    '/status - show bridge status',
+    '/logs - show redacted diagnostics',
+  ].join('\n');
+}
+
+function sanitizeWorktreeName(value) {
+  const text = String(value ?? '').trim();
+  if (!/^[A-Za-z0-9._-]{1,80}$/.test(text)) return null;
+  if (text === '.' || text === '..' || text.includes('..')) return null;
+  return text;
 }
 
 function redact(value) {

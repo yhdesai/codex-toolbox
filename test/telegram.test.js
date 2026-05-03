@@ -51,6 +51,22 @@ test('deletes and edits forum topics', async () => {
   assert.equal(calls[1].body.name, 'renamed topic');
 });
 
+test('sets Telegram command menu', async () => {
+  const calls = [];
+  const client = new TelegramClient({
+    token: 'token',
+    fetchImpl: async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      return { ok: true, json: async () => ({ ok: true, result: true }) };
+    },
+  });
+
+  await client.setMyCommands([{ command: 'new', description: 'Create a Codex topic' }]);
+
+  assert.match(calls[0].url, /setMyCommands$/);
+  assert.deepEqual(calls[0].body.commands, [{ command: 'new', description: 'Create a Codex topic' }]);
+});
+
 test('parses commands and forum messages', () => {
   assert.equal(getCommand({ text: '/bind@my_bot now' }), '/bind');
   assert.equal(isForumMessage({ chat: { type: 'supergroup' }, is_topic_message: true }), true);

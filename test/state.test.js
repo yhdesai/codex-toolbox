@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { BridgeState } from '../src/state.js';
 
@@ -20,6 +20,41 @@ test('persists group binding and thread topic mappings', async () => {
 
   const raw = JSON.parse(await readFile(file, 'utf8'));
   assert.equal(raw.threads['thread-a'].title, 'Thread A');
+});
+
+test('keeps thread and topic mappings one-to-one', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-state-'));
+  const file = join(dir, 'state.json');
+
+  const state = await BridgeState.load(file);
+  await state.mapThread('thread-a', 41, 'Thread A');
+  await state.mapThread('thread-a', 42, 'Thread A moved');
+  await state.mapThread('thread-b', 42, 'Thread B');
+
+  assert.equal(state.getTopicForThread('thread-a'), null);
+  assert.equal(state.getTopicForThread('thread-b'), 42);
+  assert.equal(state.getThreadForTopic(41), null);
+  assert.equal(state.getThreadForTopic(42), 'thread-b');
+});
+
+test('normalizes stale topic aliases on load', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-state-'));
+  const file = join(dir, 'state.json');
+  await writeState(file, {
+    threads: {
+      'thread-a': { threadId: 'thread-a', messageThreadId: 42, title: 'Thread A' },
+    },
+    topics: {
+      41: { messageThreadId: 41, threadId: 'thread-a' },
+      42: { messageThreadId: 42, threadId: 'thread-a' },
+    },
+  });
+
+  const loaded = await BridgeState.load(file);
+
+  assert.equal(loaded.getTopicForThread('thread-a'), 42);
+  assert.equal(loaded.getThreadForTopic(41), null);
+  assert.equal(loaded.getThreadForTopic(42), 'thread-a');
 });
 
 test('approval records are one-shot', async () => {
@@ -78,3 +113,19 @@ test('persists Discord guild, project, and channel mappings', async () => {
   assert.equal(unmapped.threadId, 'thread-a');
   assert.equal(loaded.getDiscordChannelForThread('thread-a'), null);
 });
+
+async function writeState(file, partial) {
+  const state = {
+    boundChatId: null,
+    threads: {},
+    topics: {},
+    approvals: {},
+    paused: { mirroring: false },
+    deletedThreadBaselines: {},
+    lastErrors: [],
+    discord: { guildId: null, projects: {}, threads: {}, channels: {} },
+    ...partial,
+  };
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}

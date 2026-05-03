@@ -56,6 +56,10 @@ export class BridgeState {
   async mapThread(threadId, messageThreadId, title = null) {
     const threadKey = String(threadId);
     const topicKey = String(messageThreadId);
+    const previousThread = this.data.threads[threadKey];
+    if (previousThread) delete this.data.topics[String(previousThread.messageThreadId)];
+    const previousTopic = this.data.topics[topicKey];
+    if (previousTopic) delete this.data.threads[String(previousTopic.threadId)];
     this.data.threads[threadKey] = {
       threadId: threadKey,
       messageThreadId: Number(messageThreadId),
@@ -205,10 +209,30 @@ export class BridgeState {
 }
 
 function normalizeState(value) {
+  const threads = value?.threads && typeof value.threads === 'object' ? value.threads : {};
+  const topics = value?.topics && typeof value.topics === 'object' ? value.topics : {};
+  const normalizedTopics = {};
+  for (const [threadId, thread] of Object.entries(threads)) {
+    const topicId = thread?.messageThreadId;
+    if (topicId == null) continue;
+    normalizedTopics[String(topicId)] = {
+      messageThreadId: Number(topicId),
+      threadId: String(thread.threadId ?? threadId),
+    };
+  }
+  for (const [topicId, topic] of Object.entries(topics)) {
+    const thread = threads[String(topic?.threadId)];
+    if (thread && String(thread.messageThreadId) === String(topicId)) {
+      normalizedTopics[String(topicId)] = {
+        messageThreadId: Number(topicId),
+        threadId: String(topic.threadId),
+      };
+    }
+  }
   return {
     boundChatId: value?.boundChatId == null ? null : String(value.boundChatId),
-    threads: value?.threads && typeof value.threads === 'object' ? value.threads : {},
-    topics: value?.topics && typeof value.topics === 'object' ? value.topics : {},
+    threads,
+    topics: normalizedTopics,
     approvals: value?.approvals && typeof value.approvals === 'object' ? value.approvals : {},
     paused: {
       mirroring: Boolean(value?.paused?.mirroring),
