@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import https from 'node:https';
 import { chunkTelegramText } from './chunking.js';
 
 export class TelegramClient extends EventEmitter {
@@ -38,20 +39,18 @@ export class TelegramClient extends EventEmitter {
   }
 
   async api(method, payload) {
-    const response = await this.fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const body = await response.json().catch(() => null);
-    if (!response.ok || !body?.ok) {
-      const message = body?.description || `${method} failed with HTTP ${response.status}`;
+    const response = this.fetch === globalThis.fetch
+      ? await postTelegramJson(this.token, method, payload)
+      : await fetchTelegramJson(this.fetch, this.token, method, payload);
+
+    if (!response.ok || !response.body?.ok) {
+      const message = response.body?.description || `${method} failed with HTTP ${response.status}`;
       const error = new Error(message);
-      error.response = body;
-      error.retryAfter = body?.parameters?.retry_after;
+      error.response = response.body;
+      error.retryAfter = response.body?.parameters?.retry_after;
       throw error;
     }
-    return body.result;
+    return response.body.result;
   }
 
   async createForumTopic(chatId, name) {
@@ -97,6 +96,17 @@ export class TelegramClient extends EventEmitter {
     return this.api('sendMessage', payload);
   }
 
+  async editMessageText({ chatId, messageId, text, replyMarkup = null }) {
+    const payload = {
+      chat_id: chatId,
+      message_id: Number(messageId),
+      text,
+      disable_web_page_preview: true,
+    };
+    if (replyMarkup) payload.reply_markup = replyMarkup;
+    return this.api('editMessageText', payload);
+  }
+
   async answerCallbackQuery(callbackQueryId, text = null) {
     return this.api('answerCallbackQuery', {
       callback_query_id: callbackQueryId,
@@ -138,6 +148,55 @@ export function sanitizeTopicName(name) {
     .trim()
     .slice(0, 120);
   return normalized || 'Codex Thread';
+}
+
+async function fetchTelegramJson(fetchImpl, token, method, payload) {
+  const response = await fetchImpl(`https://api.telegram.org/bot${token}/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => null);
+  return { ok: response.ok, status: response.status, body };
+}
+
+function postTelegramJson(token, method, payload) {
+  const requestBody = JSON.stringify(payload || {});
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      {
+        hostname: 'api.telegram.org',
+        path: `/bot${token}/${method}`,
+        method: 'POST',
+        family: 4,
+        timeout: 30000,
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(requestBody),
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        response.on('end', () => {
+          const rawBody = Buffer.concat(chunks).toString('utf8');
+          let body = null;
+          try {
+            body = rawBody ? JSON.parse(rawBody) : null;
+          } catch (_) {
+            body = { rawBody };
+          }
+          resolve({ ok: response.statusCode >= 200 && response.statusCode < 300, status: response.statusCode || 0, body });
+        });
+      },
+    );
+
+    request.on('error', reject);
+    request.on('timeout', () => request.destroy(new Error(`Telegram ${method} request timed out`)));
+    request.write(requestBody);
+    request.end();
+  });
 }
 
 function delay(ms) {

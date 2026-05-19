@@ -4,11 +4,14 @@ import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { chunkTelegramText } from './chunking.js';
 import { approvalKeyboard, getCommand, isForumMessage } from './telegram.js';
 import { approvalLabels, extractUserMessageText, renderApprovalPrompt, renderCodexEvent } from './mirror-policy.js';
 
 const TELEGRAM_ECHO_SUPPRESSION_MS = 2 * 60 * 1000;
 const MIRROR_DEDUPE_MS = 5 * 60 * 1000;
+const TELEGRAM_STREAM_EDIT_INTERVAL_MS = 900;
+const TELEGRAM_STREAM_TEXT_LIMIT = 3900;
 const PM2_LOG_LINES = 40;
 const GLOBAL_ECHO_SUPPRESSION_KEY = '*';
 const DEFAULT_PROJECTS_ROOT = join(homedir(), 'projects-shiprdev');
@@ -43,6 +46,7 @@ export class CodexTelegramTopicBridge {
     this.knownThreadUpdatedAt = new Map();
     this.startedAtMs = Date.now();
     this.agentMessageBuffers = new Map();
+    this.agentMessageStreams = new Map();
     this.telegramEchoSuppressions = new Map();
     this.recentMirroredMessages = new Map();
     this.lastDiscoveryStats = { seen: 0, created: 0, resumed: 0, skipped: 0 };
@@ -675,12 +679,12 @@ export class CodexTelegramTopicBridge {
     if (!this.state.boundChatId || !event.threadId) return;
     if (this.#consumeTelegramEchoSuppression(event)) return;
     if (this.state.data.paused?.mirroring) return;
-    if (this.#bufferAgentMessageDelta(event)) return;
-    const completedBufferedText = this.#takeCompletedAgentMessage(event);
-    if (completedBufferedText) {
+    if (await this.#streamAgentMessageDelta(event)) return;
+    const completedAgentMessage = this.#takeCompletedAgentMessage(event);
+    if (completedAgentMessage) {
       const messageThreadId = await this.#ensureTopicForThread(event.threadId);
       if (!messageThreadId) return;
-      await this.#sendMirroredMessage(event.threadId, messageThreadId, completedBufferedText);
+      await this.#finalizeAgentMessageStream(event.threadId, messageThreadId, completedAgentMessage);
       return;
     }
     const text = renderCodexEvent(event);
@@ -847,7 +851,7 @@ export class CodexTelegramTopicBridge {
     return sections.join('\n\n');
   }
 
-  #bufferAgentMessageDelta(event) {
+  async #streamAgentMessageDelta(event) {
     if (event.method !== 'item/agentMessage/delta') return false;
     const params = event.raw.params ?? {};
     const itemId = params.itemId ?? params.item_id ?? params.item?.id;
@@ -855,7 +859,11 @@ export class CodexTelegramTopicBridge {
     if (!itemId || typeof delta !== 'string') return false;
     const key = String(itemId);
     const current = this.agentMessageBuffers.get(key) ?? '';
-    this.agentMessageBuffers.set(key, current + delta);
+    const next = current + delta;
+    this.agentMessageBuffers.set(key, next);
+    const messageThreadId = await this.#ensureTopicForThread(event.threadId);
+    if (!messageThreadId) return true;
+    await this.#updateAgentMessageStream(event.threadId, messageThreadId, key, next, false);
     return true;
   }
 
@@ -863,10 +871,84 @@ export class CodexTelegramTopicBridge {
     if (event.method !== 'item/completed') return null;
     const item = event.raw.params?.item;
     if (item?.type !== 'agentMessage' || !item.id) return null;
-    const buffered = this.agentMessageBuffers.get(String(item.id));
-    this.agentMessageBuffers.delete(String(item.id));
+    const itemId = String(item.id);
+    const buffered = this.agentMessageBuffers.get(itemId);
+    this.agentMessageBuffers.delete(itemId);
     const text = (buffered || item.text || '').trim();
-    return text ? `Codex\n${text}` : null;
+    return text ? { itemId, text: `Codex\n${text}` } : null;
+  }
+
+  async #updateAgentMessageStream(threadId, messageThreadId, itemId, text, force) {
+    const renderedText = `Codex\n${text.trim()}`;
+    if (!renderedText.trim()) return;
+    if (this.#rememberMirroredMessage(threadId, renderedText, { dryRun: true })) return;
+    if (renderedText.length > TELEGRAM_STREAM_TEXT_LIMIT) return;
+
+    const stream = this.agentMessageStreams.get(itemId);
+    if (!stream) {
+      const nextStream = {
+        messageId: null,
+        sentText: renderedText,
+        pendingText: renderedText,
+        lastEditedAt: Date.now(),
+        creating: true,
+      };
+      this.agentMessageStreams.set(itemId, nextStream);
+      const sent = await this.telegram.sendMessage({
+        chatId: this.state.boundChatId,
+        messageThreadId,
+        text: renderedText,
+      });
+      const firstMessage = Array.isArray(sent) ? sent[0] : sent;
+      nextStream.messageId = firstMessage?.message_id ?? null;
+      nextStream.creating = false;
+      nextStream.lastEditedAt = Date.now();
+      if (nextStream.messageId && nextStream.pendingText !== nextStream.sentText) {
+        await this.telegram.editMessageText({
+          chatId: this.state.boundChatId,
+          messageId: nextStream.messageId,
+          text: nextStream.pendingText,
+        });
+        nextStream.sentText = nextStream.pendingText;
+        nextStream.lastEditedAt = Date.now();
+      }
+      return;
+    }
+
+    if (stream.pendingText === renderedText) return;
+    stream.pendingText = renderedText;
+    if (stream.creating || !stream.messageId) return;
+    const now = Date.now();
+    if (!force && now - stream.lastEditedAt < TELEGRAM_STREAM_EDIT_INTERVAL_MS) return;
+    await this.telegram.editMessageText({
+      chatId: this.state.boundChatId,
+      messageId: stream.messageId,
+      text: renderedText,
+    });
+    stream.sentText = renderedText;
+    stream.lastEditedAt = now;
+  }
+
+  async #finalizeAgentMessageStream(threadId, messageThreadId, message) {
+    const stream = this.agentMessageStreams.get(message.itemId);
+    this.agentMessageStreams.delete(message.itemId);
+    if (this.#rememberMirroredMessage(threadId, message.text)) return;
+
+    if (!stream?.messageId) {
+      await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text: message.text });
+      return;
+    }
+    const [firstChunk, ...remainingChunks] = chunkTelegramText(message.text);
+    if (stream.sentText !== firstChunk) {
+      await this.telegram.editMessageText({
+        chatId: this.state.boundChatId,
+        messageId: stream.messageId,
+        text: firstChunk,
+      });
+    }
+    for (const chunk of remainingChunks) {
+      await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text: chunk });
+    }
   }
 
   async #sendMirroredMessage(threadId, messageThreadId, text) {
@@ -874,7 +956,7 @@ export class CodexTelegramTopicBridge {
     await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text });
   }
 
-  #rememberMirroredMessage(threadId, text) {
+  #rememberMirroredMessage(threadId, text, options = {}) {
     const normalizedText = normalizeText(text);
     if (!normalizedText) return false;
     const key = String(threadId);
@@ -882,6 +964,7 @@ export class CodexTelegramTopicBridge {
     const recent = (this.recentMirroredMessages.get(key) ?? [])
       .filter((entry) => now - entry.createdAt <= MIRROR_DEDUPE_MS);
     const duplicate = recent.some((entry) => entry.text === normalizedText);
+    if (options.dryRun) return duplicate;
     if (!duplicate) recent.push({ text: normalizedText, createdAt: now });
     if (recent.length) this.recentMirroredMessages.set(key, recent);
     else this.recentMirroredMessages.delete(key);

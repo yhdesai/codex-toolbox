@@ -177,7 +177,7 @@ test('newly discovered CLI session files mirror existing first turn after topic 
   ]);
 });
 
-test('agent message deltas are buffered until item completion', async () => {
+test('agent message deltas stream into Telegram edits', async () => {
   const state = memoryState();
   await state.bindChat(-100);
   await state.mapThread('old', 44, 'Old');
@@ -194,7 +194,8 @@ test('agent message deltas are buffered until item completion', async () => {
     });
   }
   await tick();
-  assert.deepEqual(telegram.sent, []);
+  assert.equal(telegram.sent.length, 1);
+  assert.equal(telegram.sent[0].text, 'Codex\nHi');
 
   codex.emit('event', {
     method: 'item/completed',
@@ -205,7 +206,7 @@ test('agent message deltas are buffered until item completion', async () => {
   await bridge.stop();
 
   assert.equal(telegram.sent.length, 1);
-  assert.equal(telegram.sent[0].text, 'Codex\nHi. What do you want?');
+  assert.equal(telegram.edited.at(-1).text, 'Codex\nHi. What do you want?');
 });
 
 test('thread status changes are not mirrored', async () => {
@@ -946,6 +947,10 @@ function fakeTelegram() {
   };
   telegram.sendMessage = async (message) => {
     telegram.sent.push(message);
+    return { message_id: telegram.sent.length };
+  };
+  telegram.editMessageText = async (message) => {
+    telegram.edited.push(message);
   };
   telegram.answerCallbackQuery = async (id, text) => {
     telegram.callbackAnswers.push({ id, text });

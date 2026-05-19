@@ -51,6 +51,24 @@ test('deletes and edits forum topics', async () => {
   assert.equal(calls[1].body.name, 'renamed topic');
 });
 
+test('edits message text', async () => {
+  const calls = [];
+  const client = new TelegramClient({
+    token: 'token',
+    fetchImpl: async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      return { ok: true, json: async () => ({ ok: true, result: { message_id: 12 } }) };
+    },
+  });
+
+  await client.editMessageText({ chatId: -1001, messageId: 12, text: 'updated' });
+
+  assert.match(calls[0].url, /editMessageText$/);
+  assert.equal(calls[0].body.chat_id, -1001);
+  assert.equal(calls[0].body.message_id, 12);
+  assert.equal(calls[0].body.text, 'updated');
+});
+
 test('sets Telegram command menu', async () => {
   const calls = [];
   const client = new TelegramClient({
