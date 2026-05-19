@@ -16,7 +16,7 @@ This project is intended for Codex users only right now. The easiest setup path 
 - Allowlist-based Telegram and Discord control.
 - Inline approve, decline, and cancel buttons for Codex approval requests.
 - Operational commands for status, resync, pause/resume, relink, rename, unlink, logs, and topic cleanup.
-- Local JSON state file; no hardcoded Telegram group id or Discord guild id.
+- Local JSON state file; Telegram and Discord can be bound at runtime, with optional Discord env pre-bind.
 
 ## Requirements
 
@@ -64,6 +64,7 @@ Or for Discord:
 export CODEX_SYNC_PROVIDER=discord
 export DISCORD_BOT_TOKEN=replace-me
 export DISCORD_ALLOWED_USER_IDS=<discord-user-id>
+export DISCORD_GUILD_ID=<discord-server-id>
 export DISCORD_PROJECT_NAME=codex-toolbox
 ```
 
@@ -107,6 +108,7 @@ TELEGRAM_BOT_TOKEN=replace-me
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id>[,<telegram-user-id>]
 DISCORD_BOT_TOKEN=replace-me
 DISCORD_ALLOWED_USER_IDS=<discord-user-id>[,<discord-user-id>]
+DISCORD_GUILD_ID=<discord-server-id>
 CODEX_SYNC_PROVIDER=telegram|discord
 DISCORD_PROJECT_NAME=workspace-folder-name
 DISCORD_COMMAND_PREFIX=!codex
@@ -124,6 +126,7 @@ Defaults:
 - `CODEX_SYNC_PROVIDER`: `discord` if `DISCORD_BOT_TOKEN` is set, otherwise `telegram`
 - `DISCORD_PROJECT_NAME`: workspace folder name
 - `DISCORD_COMMAND_PREFIX`: `!codex`
+- `DISCORD_GUILD_ID`: optional server id to pre-bind at startup
 - `CODEX_TOOLBOX_STATE`: `~/.codex-toolbox.json`
 - `CODEX_TELEGRAM_POLL_MS`: `5000`
 - `TELEGRAM_ALLOWED_USER_IDS`: empty, which means nobody can control the bridge
@@ -166,6 +169,7 @@ For Discord, use:
 ```sh
 DISCORD_BOT_TOKEN=replace-me \
 DISCORD_ALLOWED_USER_IDS=<discord-user-id> \
+DISCORD_GUILD_ID=<discord-server-id> \
 CODEX_SYNC_PROVIDER=discord \
 DISCORD_PROJECT_NAME=codex-toolbox \
 CODEX_APP_SERVER_ARGS="app-server proxy" \
@@ -229,7 +233,7 @@ For Codex CLI sessions that do not emit live app-server item events to this brid
 
 ## Discovery And State
 
-The Telegram group is bound at runtime with `/bind`; no group id is hardcoded. The Discord server is bound at runtime with `!codex bind`; no guild id is hardcoded.
+The Telegram group is bound at runtime with `/bind`; no group id is hardcoded. The Discord server is bound at runtime with `!codex bind`, or pre-bound at startup with `DISCORD_GUILD_ID`.
 
 The local state file stores:
 

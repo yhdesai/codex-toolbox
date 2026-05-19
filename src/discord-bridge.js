@@ -15,6 +15,7 @@ export class CodexDiscordChannelBridge {
     allowedUserIds = [],
     projectName = basename(resolve(process.cwd())),
     commandPrefix = '!codex',
+    guildId = null,
   }) {
     this.codex = codex;
     this.discord = discord;
@@ -24,6 +25,7 @@ export class CodexDiscordChannelBridge {
     this.allowedUserIds = new Set(allowedUserIds.map((id) => String(id)));
     this.projectName = projectName || 'Codex Project';
     this.commandPrefix = commandPrefix;
+    this.guildId = guildId == null ? null : String(guildId);
     this.discoveryTimer = null;
     this.didInitialDiscovery = false;
     this.knownThreadUpdatedAt = new Map();
@@ -43,6 +45,10 @@ export class CodexDiscordChannelBridge {
       if (info?.reconnect) this.discoverThreads().catch((error) => this.#logError(error));
     });
     await this.codex.start();
+    if (this.guildId) {
+      await this.state.bindDiscordGuild(this.guildId);
+      await this.#ensureProjectCategory(this.guildId);
+    }
     await this.discoverThreads();
     this.discoveryTimer = setInterval(() => this.discoverThreads().catch((error) => this.#logError(error)), this.pollMs);
     this.discord.startGateway();

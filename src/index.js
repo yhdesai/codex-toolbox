@@ -23,6 +23,7 @@ export async function createBridge(options) {
       allowedUserIds: options.allowedDiscordUserIds,
       projectName: options.discordProjectName,
       commandPrefix: options.discordCommandPrefix,
+      guildId: options.discordGuildId,
     });
   }
   return new CodexTelegramTopicBridge({
@@ -68,6 +69,7 @@ export function createBridgeFromEnv(env) {
         telegramToken: env.TELEGRAM_BOT_TOKEN,
         discordToken: env.DISCORD_BOT_TOKEN,
         allowedDiscordUserIds,
+        discordGuildId: env.DISCORD_GUILD_ID,
         discordProjectName: env.DISCORD_PROJECT_NAME || basename(resolve(env.CODEX_APP_SERVER_CWD || process.cwd())),
         discordCommandPrefix: env.DISCORD_COMMAND_PREFIX || '!codex',
         pollMs,

@@ -19,6 +19,21 @@ test('Discord /bind creates a project category without backfilling old threads',
   assert.equal(state.getDiscordChannelForThread('old'), null);
 });
 
+test('Discord bridge can pre-bind a guild from env config', async () => {
+  const state = memoryState();
+  const discord = fakeDiscord();
+  const codex = fakeCodex({ threads: [{ id: 'old', title: 'Old', createdAt: Date.now() - 10000 }] });
+  const bridge = new CodexDiscordChannelBridge({ codex, discord, state, allowedUserIds: ['user-1'], projectName: 'codex-toolbox', guildId: 'guild-1' });
+
+  await bridge.start();
+  await bridge.stop();
+
+  assert.equal(state.data.discord.guildId, 'guild-1');
+  assert.equal(state.data.discord.projects['codex-toolbox'].categoryId, 'cat-1');
+  assert.deepEqual(discord.categories, [{ guildId: 'guild-1', name: 'codex-toolbox', id: 'cat-1' }]);
+  assert.equal(state.getDiscordChannelForThread('old'), null);
+});
+
 test('new Codex threads create Discord channels under the project category', async () => {
   const state = memoryState();
   await state.bindDiscordGuild('guild-1');

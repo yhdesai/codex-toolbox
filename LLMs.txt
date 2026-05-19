@@ -40,6 +40,7 @@ For Discord:
 ```sh
 DISCORD_BOT_TOKEN=replace-me
 DISCORD_ALLOWED_USER_IDS=<discord-user-id>[,<discord-user-id>]
+DISCORD_GUILD_ID=<discord-server-id>
 CODEX_SYNC_PROVIDER=discord
 ```
 
@@ -95,6 +96,7 @@ For Discord:
 ```sh
 DISCORD_BOT_TOKEN=replace-me \
 DISCORD_ALLOWED_USER_IDS=<discord-user-id> \
+DISCORD_GUILD_ID=<discord-server-id> \
 CODEX_SYNC_PROVIDER=discord \
 npm start
 ```
@@ -159,6 +161,7 @@ Discord PM2 example:
 ```sh
 DISCORD_BOT_TOKEN=replace-me \
 DISCORD_ALLOWED_USER_IDS=<discord-user-id> \
+DISCORD_GUILD_ID=<discord-server-id> \
 CODEX_SYNC_PROVIDER=discord \
 DISCORD_PROJECT_NAME=codex-toolbox \
 CODEX_APP_SERVER_ARGS="app-server proxy" \
@@ -179,7 +182,7 @@ pm2 save
 - Destination must be a Discord server where the bot is installed.
 - Enable Message Content Intent in the Discord Developer Portal.
 - Bot needs `Manage Channels`, `View Channels`, `Send Messages`, and `Read Message History`.
-- Server is bound at runtime with `!codex bind`; do not hardcode the guild id.
+- Server is bound at runtime with `!codex bind`, or pre-bound with `DISCORD_GUILD_ID`.
 - The project category defaults to the workspace folder name, or `DISCORD_PROJECT_NAME`.
 
 ## Command Reference
@@ -239,6 +242,7 @@ TELEGRAM_BOT_TOKEN=replace-me
 TELEGRAM_ALLOWED_USER_IDS=<telegram-user-id>
 DISCORD_BOT_TOKEN=replace-me
 DISCORD_ALLOWED_USER_IDS=<discord-user-id>
+DISCORD_GUILD_ID=<discord-server-id>
 ```
 
 ## Important Implementation Details
