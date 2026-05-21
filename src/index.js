@@ -7,6 +7,7 @@ import { CodexAppServer } from './codex-app-server.js';
 import { CodexTelegramTopicBridge } from './bridge.js';
 import { CodexDiscordChannelBridge } from './discord-bridge.js';
 import { CodexCliFallback } from './cli-fallback.js';
+import { WatchApiServer, parseWatchProjects } from './watch-api.js';
 
 export async function createBridge(options) {
   const state = await BridgeState.load(options.statePath);
@@ -76,8 +77,20 @@ export function createBridgeFromEnv(env) {
         allowedUserIds,
       });
       await this.bridge.start();
+      if (env.CODEX_WATCH_API_PORT) {
+        this.watchApi = new WatchApiServer({
+          bridge: this.bridge,
+          host: env.CODEX_WATCH_API_HOST || '127.0.0.1',
+          port: Number(env.CODEX_WATCH_API_PORT),
+          token: env.CODEX_WATCH_API_TOKEN || '',
+          projects: parseWatchProjects(env.CODEX_WATCH_PROJECTS, env.CODEX_APP_SERVER_CWD || process.cwd()),
+        });
+        const url = await this.watchApi.start();
+        console.error(`Codex Watch API listening on ${url}`);
+      }
     },
     async stop() {
+      await this.watchApi?.stop();
       await this.bridge?.stop();
     },
   };
@@ -101,3 +114,4 @@ export { CodexAppServer } from './codex-app-server.js';
 export { CodexTelegramTopicBridge } from './bridge.js';
 export { CodexDiscordChannelBridge } from './discord-bridge.js';
 export { CodexCliFallback } from './cli-fallback.js';
+export { WatchApiServer, parseWatchProjects } from './watch-api.js';

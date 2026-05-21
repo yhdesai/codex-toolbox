@@ -1,0 +1,32 @@
+name: CodexSync
+options:
+  bundleIdPrefix: com.codextoolbox
+  deploymentTarget:
+    iOS: "17.0"
+    watchOS: "10.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+targets:
+  CodexSync:
+    type: application
+    platform: iOS
+    sources:
+      - path: Shared
+      - path: iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.codextoolbox.CodexSync
+        INFOPLIST_KEY_CFBundleDisplayName: Codex Sync
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+  CodexSyncWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - path: Shared
+      - path: Watch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.codextoolbox.CodexSync.watchkitapp
+        INFOPLIST_KEY_CFBundleDisplayName: Codex Sync

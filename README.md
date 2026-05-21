@@ -13,6 +13,7 @@ This project is intended for Codex users only right now. The easiest setup path 
 - Chat replies route back to the matching Codex thread.
 - `/new` or `!codex new` creates a new Codex thread and chat destination.
 - CLI-created Codex sessions are detected and mirrored.
+- Optional Watch API for iPhone/watchOS clients to start Codex sessions and poll compact progress.
 - Allowlist-based Telegram and Discord control.
 - Inline approve, decline, and cancel buttons for Codex approval requests.
 - Operational commands for status, resync, pause/resume, relink, rename, unlink, logs, and topic cleanup.
@@ -117,6 +118,10 @@ CODEX_APP_SERVER_ARGS="app-server proxy"
 CODEX_APP_SERVER_CWD=/path/to/workspace
 CODEX_TOOLBOX_STATE=~/.codex-toolbox.json
 CODEX_TELEGRAM_POLL_MS=5000
+CODEX_WATCH_API_PORT=8787
+CODEX_WATCH_API_HOST=127.0.0.1
+CODEX_WATCH_API_TOKEN=replace-me
+CODEX_WATCH_PROJECTS="codex-toolbox=/path/to/codex-toolbox,web=/path/to/web"
 ```
 
 Defaults:
@@ -129,6 +134,10 @@ Defaults:
 - `DISCORD_GUILD_ID`: optional server id to pre-bind at startup
 - `CODEX_TOOLBOX_STATE`: `~/.codex-toolbox.json`
 - `CODEX_TELEGRAM_POLL_MS`: `5000`
+- `CODEX_WATCH_API_PORT`: unset by default; set it to enable the iPhone/watchOS HTTP API
+- `CODEX_WATCH_API_HOST`: `127.0.0.1`; a token is required if this is not loopback
+- `CODEX_WATCH_API_TOKEN`: optional bearer token for the Watch API; strongly recommended for any non-local tunnel
+- `CODEX_WATCH_PROJECTS`: comma-separated project list for the app, either `/path/to/project` or `name=/path/to/project`
 - `TELEGRAM_ALLOWED_USER_IDS`: empty, which means nobody can control the bridge
 - `DISCORD_ALLOWED_USER_IDS`: empty, which means nobody can control the Discord bridge
 
@@ -213,6 +222,63 @@ Plain text inside a mapped topic is sent to the matching Codex thread. Plain tex
 Plain text inside a mapped Discord channel is sent to the matching Codex thread. Plain text from an allowed user in an unmapped channel gets guidance. Unauthorized text is ignored silently.
 
 Discord creates one category for the current project, using `DISCORD_PROJECT_NAME` or the workspace folder name. Each Codex thread becomes a text channel inside that category.
+
+## iPhone and Apple Watch API
+
+Set `CODEX_WATCH_API_PORT` to expose a small JSON API designed for an iPhone app and Apple Watch companion. The Watch can start a Codex session, show compact progress, send a short reply, and interrupt a run. Detailed diff/log review should still happen on iPhone, Telegram, Discord, or desktop.
+
+Native SwiftUI client source lives in `apps/apple`. It includes an iPhone app and a watchOS app that use this API.
+
+Example startup:
+
+```sh
+CODEX_WATCH_API_PORT=8787 \
+CODEX_WATCH_API_TOKEN=replace-me \
+CODEX_WATCH_PROJECTS="toolbox=/home/yash/projects-shiprdev/codex-sync,web=/home/yash/projects-shiprdev/web" \
+npm start
+```
+
+For remote access from iPhone/watchOS, put this behind a private tunnel or reverse proxy and keep `CODEX_WATCH_API_TOKEN` enabled.
+
+Endpoints:
+
+```text
+GET  /watch/health
+GET  /watch/projects
+GET  /watch/sessions
+GET  /watch/sessions/:threadId
+POST /watch/sessions
+POST /watch/sessions/:threadId/reply
+POST /watch/sessions/:threadId/interrupt
+```
+
+Use `Authorization: Bearer <CODEX_WATCH_API_TOKEN>` or `X-Codex-Watch-Token: <token>` when a token is configured.
+
+Start a session:
+
+```sh
+curl -X POST http://127.0.0.1:8787/watch/sessions \
+  -H 'Authorization: Bearer replace-me' \
+  -H 'Content-Type: application/json' \
+  -d '{"cwd":"toolbox","prompt":"Fix the login crash and open a PR"}'
+```
+
+Compact session response:
+
+```json
+{
+  "session": {
+    "threadId": "thread-id",
+    "title": "Fix the login crash",
+    "cwd": "/home/yash/projects-shiprdev/codex-sync",
+    "status": "working",
+    "latest": "Prompt sent",
+    "events": []
+  }
+}
+```
+
+Watch-friendly statuses include `starting`, `working`, `editing`, `running_command`, `testing`, `waiting`, `done`, `error`, and `interrupted`.
 
 ## Mirroring Behavior
 
