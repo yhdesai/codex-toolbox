@@ -69,6 +69,60 @@ test('edits message text', async () => {
   assert.equal(calls[0].body.text, 'updated');
 });
 
+test('paces queued group sends', async () => {
+  const calls = [];
+  const client = new TelegramClient({
+    token: 'token',
+    minGroupIntervalMs: 20,
+    fetchImpl: async (url, options) => {
+      calls.push({ at: Date.now(), url, body: JSON.parse(options.body) });
+      return { ok: true, json: async () => ({ ok: true, result: { message_id: calls.length } }) };
+    },
+  });
+
+  const startedAt = Date.now();
+  await Promise.all([
+    client.sendMessage({ chatId: -1001, text: 'one' }),
+    client.sendMessage({ chatId: -1001, text: 'two' }),
+  ]);
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].at - calls[0].at >= 15);
+  assert.ok(Date.now() - startedAt >= 15);
+});
+
+test('retries Telegram 429 responses after retry_after', async () => {
+  const calls = [];
+  const rateLimits = [];
+  const client = new TelegramClient({
+    token: 'token',
+    retryBufferMs: 0,
+    fetchImpl: async (url, options) => {
+      calls.push({ at: Date.now(), url, body: JSON.parse(options.body) });
+      if (calls.length === 1) {
+        return {
+          ok: false,
+          json: async () => ({
+            ok: false,
+            error_code: 429,
+            description: 'Too Many Requests: retry after 0.02',
+            parameters: { retry_after: 0.02 },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true, result: { message_id: 2 } }) };
+    },
+  });
+  client.on('rateLimit', (event) => rateLimits.push(event));
+
+  await client.sendMessage({ chatId: -1001, text: 'retry me' });
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].at - calls[0].at >= 15);
+  assert.equal(rateLimits.length, 1);
+  assert.equal(rateLimits[0].method, 'sendMessage');
+});
+
 test('sets Telegram command menu', async () => {
   const calls = [];
   const client = new TelegramClient({

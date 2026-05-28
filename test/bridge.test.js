@@ -125,6 +125,64 @@ test('mapped CLI session files are tailed for new messages', async () => {
   assert.deepEqual(telegram.sent.map((message) => message.text), ['User\nfrom cli', 'Codex\nfrom assistant']);
 });
 
+test('mapped session files are tailed even when app-server reports vscode source', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-vscode-'));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, `${sessionLine('user_message', { message: 'old' })}\n`, 'utf8');
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('vscode-thread', 44, 'VS Code');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex({ threads: [{ id: 'vscode-thread', title: 'VS Code', source: 'vscode', path: file, updatedAt: '1' }] });
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  await appendFile(file, `${sessionLine('agent_message', { message: 'from assistant' })}\n`, 'utf8');
+  await bridge.discoverThreads();
+  await bridge.stop();
+
+  assert.deepEqual(telegram.sent.map((message) => message.text), ['Codex\nfrom assistant']);
+});
+
+test('session file tailing mirrors response_item message records', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-response-item-'));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, '', 'utf8');
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('response-thread', 44, 'Response');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex({ threads: [{ id: 'response-thread', title: 'Response', source: 'vscode', path: file, updatedAt: '1' }] });
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  await appendFile(file, `${responseMessageLine('assistant', 'from response item')}\n`, 'utf8');
+  await bridge.discoverThreads();
+  await bridge.stop();
+
+  assert.deepEqual(telegram.sent.map((message) => message.text), ['Codex\nfrom response item']);
+});
+
+test('session file tailing sends debug notices for message records without text', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-debug-skip-'));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, '', 'utf8');
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('debug-thread', 44, 'Debug');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex({ threads: [{ id: 'debug-thread', title: 'Debug', source: 'unknown-source', path: file, updatedAt: '1' }] });
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  await appendFile(file, `${responseMessageLine('assistant', '')}\n`, 'utf8');
+  await bridge.discoverThreads();
+  await bridge.stop();
+
+  assert.match(telegram.sent.at(-1).text, /Debug: Codex message not sent to Telegram/);
+  assert.match(telegram.sent.at(-1).text, /response_item assistant message had no text content/);
+});
+
 test('CLI session tailing does not duplicate messages already mirrored from app-server events', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-cli-'));
   const file = join(dir, 'session.jsonl');
@@ -1052,5 +1110,17 @@ function sessionLine(type, payload) {
     timestamp: new Date().toISOString(),
     type: 'event_msg',
     payload: { type, ...payload },
+  });
+}
+
+function responseMessageLine(role, text) {
+  return JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role,
+      content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }],
+    },
   });
 }

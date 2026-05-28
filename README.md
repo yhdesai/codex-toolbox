@@ -118,6 +118,9 @@ CODEX_APP_SERVER_ARGS="app-server proxy"
 CODEX_APP_SERVER_CWD=/path/to/workspace
 CODEX_TOOLBOX_STATE=~/.codex-toolbox.json
 CODEX_TELEGRAM_POLL_MS=5000
+CODEX_TELEGRAM_PRIVATE_INTERVAL_MS=1000
+CODEX_TELEGRAM_GROUP_INTERVAL_MS=3200
+CODEX_TELEGRAM_GLOBAL_INTERVAL_MS=40
 CODEX_WATCH_API_PORT=8787
 CODEX_WATCH_API_HOST=127.0.0.1
 CODEX_WATCH_API_TOKEN=replace-me
@@ -134,6 +137,9 @@ Defaults:
 - `DISCORD_GUILD_ID`: optional server id to pre-bind at startup
 - `CODEX_TOOLBOX_STATE`: `~/.codex-toolbox.json`
 - `CODEX_TELEGRAM_POLL_MS`: `5000`
+- `CODEX_TELEGRAM_PRIVATE_INTERVAL_MS`: `1000`, one outbound Telegram message per second per private chat
+- `CODEX_TELEGRAM_GROUP_INTERVAL_MS`: `3200`, about 20 outbound Telegram messages per minute per group
+- `CODEX_TELEGRAM_GLOBAL_INTERVAL_MS`: `40`, a conservative global Bot API pacing delay between outbound calls
 - `CODEX_WATCH_API_PORT`: unset by default; set it to enable the iPhone/watchOS HTTP API
 - `CODEX_WATCH_API_HOST`: `127.0.0.1`; a token is required if this is not loopback
 - `CODEX_WATCH_API_TOKEN`: optional bearer token for the Watch API; strongly recommended for any non-local tunnel
@@ -350,7 +356,7 @@ sed -n '1,220p' ~/.codex-toolbox.json
 Common issues:
 
 - `Bad Request: not enough rights to create a topic`: make the bot an admin with forum topic permissions, then run `/bind` again.
-- `Too Many Requests: retry after N`: Telegram is rate-limiting topic or message creation. The bridge backs off automatically.
+- `Too Many Requests: retry after N`: Telegram is rate-limiting topic or message creation. The bridge queues outbound Telegram calls, paces group sends, and retries automatically after Telegram's requested delay.
 - No Telegram response from a user: check that the user's numeric Telegram id is included in `TELEGRAM_ALLOWED_USER_IDS`.
 - Message in group gets guidance instead of routing: send it inside a mapped forum topic, not the general group.
 - CLI session topic appears but messages do not: run `/status` or `/resync`; the bridge tails mapped CLI session files on the discovery poll interval.

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { open, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -13,6 +13,8 @@ const MIRROR_DEDUPE_MS = 5 * 60 * 1000;
 const TELEGRAM_STREAM_EDIT_INTERVAL_MS = 900;
 const TELEGRAM_STREAM_TEXT_LIMIT = 3900;
 const PM2_LOG_LINES = 40;
+const PM2_LOG_TAIL_BYTES = 64 * 1024;
+const DEBUG_NOTICE_THROTTLE_MS = 60 * 1000;
 const GLOBAL_ECHO_SUPPRESSION_KEY = '*';
 const DEFAULT_PROJECTS_ROOT = join(homedir(), 'projects-shiprdev');
 const NEW_THREAD_SELECTION_TTL_MS = 15 * 60 * 1000;
@@ -54,6 +56,7 @@ export class CodexTelegramTopicBridge {
     this.sessionFileOffsets = new Map();
     this.newThreadSelections = new Map();
     this.pendingWorktreeCreates = new Map();
+    this.debugNotices = new Map();
   }
 
   async start() {
@@ -62,6 +65,11 @@ export class CodexTelegramTopicBridge {
       this.lastTelegramError = error.message;
       this.#rememberError(`Telegram polling error: ${error.message}`);
       this.logger.error('Telegram polling error:', error.message);
+    });
+    this.telegram.on('rateLimit', (event) => {
+      const seconds = Math.ceil((event.retryAfterMs ?? 0) / 1000);
+      this.#rememberError(`Telegram rate limit on ${event.method}; retrying after ${seconds}s`);
+      this.logger.warn(`Telegram rate limit on ${event.method}; retrying after ${seconds}s`);
     });
     this.codex.on('event', (event) => this.#mirrorCodexEvent(event).catch((error) => this.#logError(error)));
     this.codex.on('serverRequest', (request) => this.#mirrorApprovalRequest(request).catch((error) => this.#logError(error)));
@@ -92,7 +100,7 @@ export class CodexTelegramTopicBridge {
       stats.seen += 1;
       const threadKey = String(threadId);
       const sessionPath = thread.path ?? thread.rolloutPath ?? thread.rollout_path ?? null;
-      const shouldPollSessionFile = sessionPath && (thread.source === 'cli' || thread.originator === 'codex-tui');
+      const shouldPollSessionFile = Boolean(sessionPath);
       if (shouldPollSessionFile) this.sessionFilePaths.set(threadKey, sessionPath);
       const updatedAt = String(thread.updatedAt ?? thread.updated_at ?? thread.modifiedAt ?? '');
       const createdAtMs = normalizeTimestampMs(thread.createdAt ?? thread.created_at);
@@ -677,20 +685,36 @@ export class CodexTelegramTopicBridge {
 
   async #mirrorCodexEvent(event) {
     if (!this.state.boundChatId || !event.threadId) return;
-    if (this.#consumeTelegramEchoSuppression(event)) return;
-    if (this.state.data.paused?.mirroring) return;
+    if (this.#consumeTelegramEchoSuppression(event)) {
+      return;
+    }
+    if (this.state.data.paused?.mirroring) {
+      await this.#debugMirrorSkip(event.threadId, 'mirroring is paused', event.method);
+      return;
+    }
     if (await this.#streamAgentMessageDelta(event)) return;
     const completedAgentMessage = this.#takeCompletedAgentMessage(event);
     if (completedAgentMessage) {
       const messageThreadId = await this.#ensureTopicForThread(event.threadId);
-      if (!messageThreadId) return;
+      if (!messageThreadId) {
+        await this.#debugMirrorSkip(event.threadId, 'no Telegram topic is mapped for this Codex thread', event.method);
+        return;
+      }
       await this.#finalizeAgentMessageStream(event.threadId, messageThreadId, completedAgentMessage);
       return;
     }
     const text = renderCodexEvent(event);
-    if (!text) return;
+    if (!text) {
+      if (isMessageLikeCodexEvent(event)) {
+        await this.#debugMirrorSkip(event.threadId, 'app-server event had no mirrorable text', event.method);
+      }
+      return;
+    }
     const messageThreadId = await this.#ensureTopicForThread(event.threadId);
-    if (!messageThreadId) return;
+    if (!messageThreadId) {
+      await this.#debugMirrorSkip(event.threadId, 'no Telegram topic is mapped for this Codex thread', event.method);
+      return;
+    }
     await this.#sendMirroredMessage(event.threadId, messageThreadId, text);
   }
 
@@ -709,7 +733,12 @@ export class CodexTelegramTopicBridge {
   }
 
   async #pollSessionFiles() {
-    if (this.state.data.paused?.mirroring) return;
+    if (this.state.data.paused?.mirroring) {
+      for (const threadId of this.sessionFilePaths.keys()) {
+        await this.#debugMirrorSkip(threadId, 'session file polling skipped because mirroring is paused');
+      }
+      return;
+    }
     for (const [threadId, sessionPath] of this.sessionFilePaths.entries()) {
       if (!this.state.getTopicForThread(threadId)) continue;
       try {
@@ -736,11 +765,20 @@ export class CodexTelegramTopicBridge {
     this.sessionFileOffsets.set(threadId, raw.length);
     for (const line of chunk.split('\n')) {
       if (!line.trim()) continue;
-      const text = renderSessionLogLine(line);
-      if (!text) continue;
-      if (text.startsWith('User\n') && this.#consumeTextEchoSuppression(threadId, text.slice('User\n'.length))) continue;
+      const rendered = renderSessionLogLine(line);
+      if (!rendered.text) {
+        if (rendered.debugReason) await this.#debugMirrorSkip(threadId, rendered.debugReason);
+        continue;
+      }
+      const text = rendered.text;
+      if (text.startsWith('User\n') && this.#consumeTextEchoSuppression(threadId, text.slice('User\n'.length))) {
+        continue;
+      }
       const messageThreadId = this.state.getTopicForThread(threadId);
-      if (!messageThreadId) return;
+      if (!messageThreadId) {
+        await this.#debugMirrorSkip(threadId, 'no Telegram topic is mapped for this Codex thread');
+        return;
+      }
       await this.#sendMirroredMessage(threadId, messageThreadId, text);
     }
   }
@@ -841,7 +879,7 @@ export class CodexTelegramTopicBridge {
     ];
     for (const logPath of logPaths) {
       try {
-        const raw = await readFile(logPath, 'utf8');
+        const raw = await readFileTail(logPath, PM2_LOG_TAIL_BYTES);
         const tail = raw.split('\n').slice(-PM2_LOG_LINES).join('\n').trim();
         if (tail) sections.push(`${logPath}\n${redact(tail)}`);
       } catch {
@@ -880,9 +918,17 @@ export class CodexTelegramTopicBridge {
 
   async #updateAgentMessageStream(threadId, messageThreadId, itemId, text, force) {
     const renderedText = `Codex\n${text.trim()}`;
-    if (!renderedText.trim()) return;
-    if (this.#rememberMirroredMessage(threadId, renderedText, { dryRun: true })) return;
-    if (renderedText.length > TELEGRAM_STREAM_TEXT_LIMIT) return;
+    if (!renderedText.trim()) {
+      await this.#debugMirrorSkip(threadId, 'agent stream delta was empty');
+      return;
+    }
+    if (this.#rememberMirroredMessage(threadId, renderedText, { dryRun: true })) {
+      return;
+    }
+    if (renderedText.length > TELEGRAM_STREAM_TEXT_LIMIT) {
+      await this.#debugMirrorSkip(threadId, `agent stream delta exceeded ${TELEGRAM_STREAM_TEXT_LIMIT} characters`);
+      return;
+    }
 
     const stream = this.agentMessageStreams.get(itemId);
     if (!stream) {
@@ -952,8 +998,25 @@ export class CodexTelegramTopicBridge {
   }
 
   async #sendMirroredMessage(threadId, messageThreadId, text) {
-    if (this.#rememberMirroredMessage(threadId, text)) return;
+    if (this.#rememberMirroredMessage(threadId, text)) {
+      return;
+    }
     await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text });
+  }
+
+  async #debugMirrorSkip(threadId, reason, detail = null) {
+    const messageThreadId = this.state.getTopicForThread(threadId);
+    if (!this.state.boundChatId || !messageThreadId) return;
+    const key = `${threadId}:${reason}:${detail ?? ''}`;
+    const now = Date.now();
+    const lastSentAt = this.debugNotices.get(key) ?? 0;
+    if (now - lastSentAt < DEBUG_NOTICE_THROTTLE_MS) return;
+    this.debugNotices.set(key, now);
+    await this.telegram.sendMessage({
+      chatId: this.state.boundChatId,
+      messageThreadId,
+      text: `Debug: Codex message not sent to Telegram.\nReason: ${reason}${detail ? `\nCheck: ${detail}` : ''}`,
+    });
   }
 
   #rememberMirroredMessage(threadId, text, options = {}) {
@@ -1247,20 +1310,71 @@ function redact(value) {
     .replace(/bot\d{6,}:[A-Za-z0-9_-]{20,}/g, 'bot[redacted-token]');
 }
 
+async function readFileTail(path, maxBytes) {
+  const info = await stat(path);
+  const start = Math.max(0, info.size - maxBytes);
+  const length = info.size - start;
+  const handle = await open(path, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, start);
+    return buffer.toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
 function renderSessionLogLine(line) {
   let entry;
   try {
     entry = JSON.parse(line);
   } catch {
-    return null;
+    return { text: null, debugReason: 'session log line was not valid JSON' };
   }
   const payload = entry.payload ?? {};
-  if (entry.type !== 'event_msg') return null;
-  if (payload.type === 'user_message' && payload.message) return `User\n${payload.message}`;
-  if (payload.type === 'agent_message' && payload.message) return `Codex\n${payload.message}`;
-  if (payload.type === 'plan_update' && payload.explanation) return `Plan\n${payload.explanation}`;
-  if (payload.type === 'stream_error' || payload.type === 'error') return `Error\n${payload.message ?? payload.error ?? 'Unknown error'}`;
-  if (payload.type === 'exec_command_begin') return `Tool: ${payload.command ?? 'command'}`;
-  if (payload.type === 'exec_command_end') return `Tool: ${payload.command ?? 'command'}${payload.exit_code == null ? '' : ` (${payload.exit_code})`}`;
-  return null;
+  if (entry.type === 'response_item') return renderResponseItem(payload);
+  if (entry.type !== 'event_msg') return { text: null };
+  if (payload.type === 'user_message') {
+    return payload.message
+      ? { text: `User\n${payload.message}` }
+      : { text: null, debugReason: 'session user_message had no message text' };
+  }
+  if (payload.type === 'agent_message') {
+    return payload.message
+      ? { text: `Codex\n${payload.message}` }
+      : { text: null, debugReason: 'session agent_message had no message text' };
+  }
+  if (payload.type === 'plan_update' && payload.explanation) return { text: `Plan\n${payload.explanation}` };
+  if (payload.type === 'stream_error' || payload.type === 'error') return { text: `Error\n${payload.message ?? payload.error ?? 'Unknown error'}` };
+  if (payload.type === 'exec_command_begin') return { text: `Tool: ${payload.command ?? 'command'}` };
+  if (payload.type === 'exec_command_end') return { text: `Tool: ${payload.command ?? 'command'}${payload.exit_code == null ? '' : ` (${payload.exit_code})`}` };
+  return { text: null };
+}
+
+function renderResponseItem(payload) {
+  if (payload.type !== 'message') return { text: null };
+  const role = payload.role === 'user' ? 'User' : payload.role === 'assistant' ? 'Codex' : null;
+  if (!role) return { text: null, debugReason: `response_item message had unsupported role: ${payload.role ?? 'missing'}` };
+  const text = extractResponseItemText(payload.content);
+  return text ? { text: `${role}\n${text}` } : { text: null, debugReason: `response_item ${payload.role} message had no text content` };
+}
+
+function extractResponseItemText(content) {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return null;
+  const text = content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      return part?.text ?? part?.output_text ?? part?.input_text ?? '';
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  return text || null;
+}
+
+function isMessageLikeCodexEvent(event) {
+  const params = event.raw?.params ?? {};
+  const type = params.type ?? params.item?.type ?? '';
+  return /item|message|turn/.test(event.method) || /Message$/i.test(type) || params.text || params.message || params.item?.text;
 }

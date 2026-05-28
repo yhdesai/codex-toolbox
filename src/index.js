@@ -29,7 +29,12 @@ export async function createBridge(options) {
   }
   return new CodexTelegramTopicBridge({
     state,
-    telegram: options.telegram ?? new TelegramClient({ token: options.telegramToken }),
+    telegram: options.telegram ?? new TelegramClient({
+      token: options.telegramToken,
+      minPrivateIntervalMs: options.telegramPrivateIntervalMs,
+      minGroupIntervalMs: options.telegramGroupIntervalMs,
+      minGlobalIntervalMs: options.telegramGlobalIntervalMs,
+    }),
     codex: options.codex ?? new CodexAppServer({
       command: options.codexCommand,
       args: options.codexArgs,
@@ -45,6 +50,9 @@ export function createBridgeFromEnv(env) {
   const codexCommand = env.CODEX_APP_SERVER_COMMAND || 'codex';
   const codexArgs = splitArgs(env.CODEX_APP_SERVER_ARGS || 'app-server proxy');
   const pollMs = Number(env.CODEX_TELEGRAM_POLL_MS || 5000);
+  const telegramPrivateIntervalMs = Number(env.CODEX_TELEGRAM_PRIVATE_INTERVAL_MS || 1000);
+  const telegramGroupIntervalMs = Number(env.CODEX_TELEGRAM_GROUP_INTERVAL_MS || 3200);
+  const telegramGlobalIntervalMs = Number(env.CODEX_TELEGRAM_GLOBAL_INTERVAL_MS || 40);
   const allowedUserIds = splitCsv(env.TELEGRAM_ALLOWED_USER_IDS || '');
   const provider = env.CODEX_SYNC_PROVIDER || (env.DISCORD_BOT_TOKEN ? 'discord' : 'telegram');
   const allowedDiscordUserIds = splitCsv(env.DISCORD_ALLOWED_USER_IDS || '');
@@ -75,6 +83,9 @@ export function createBridgeFromEnv(env) {
         discordCommandPrefix: env.DISCORD_COMMAND_PREFIX || '!codex',
         pollMs,
         allowedUserIds,
+        telegramPrivateIntervalMs,
+        telegramGroupIntervalMs,
+        telegramGlobalIntervalMs,
       });
       await this.bridge.start();
       if (env.CODEX_WATCH_API_PORT) {
