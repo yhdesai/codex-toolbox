@@ -183,6 +183,27 @@ test('session file tailing sends debug notices for message records without text'
   assert.match(telegram.sent.at(-1).text, /response_item assistant message had no text content/);
 });
 
+test('session file tailing sends task completion notices at high priority', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-task-complete-'));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, '', 'utf8');
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('done-thread', 44, 'Done');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex({ threads: [{ id: 'done-thread', title: 'Done', source: 'exec', path: file, updatedAt: '1' }] });
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  await appendFile(file, `${sessionLine('task_complete', { duration_ms: 305000 })}\n`, 'utf8');
+  await bridge.discoverThreads();
+  await bridge.stop();
+
+  assert.match(telegram.sent.at(-1).text, /Status: Codex task complete/);
+  assert.match(telegram.sent.at(-1).text, /Duration: 5m 5s/);
+  assert.equal(telegram.sent.at(-1).priority, 'high');
+});
+
 test('CLI session tailing does not duplicate messages already mirrored from app-server events', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-cli-'));
   const file = join(dir, 'session.jsonl');
@@ -285,6 +306,64 @@ test('thread status changes are not mirrored', async () => {
   await bridge.stop();
 
   assert.deepEqual(telegram.sent, []);
+});
+
+test('turn completion sends a high priority status notice with backlog count', async () => {
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('t1', 44, 'One');
+  const telegram = fakeTelegram();
+  telegram.pendingOutboundCount = () => 7;
+  const codex = fakeCodex();
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  codex.emit('event', { method: 'turn/completed', threadId: 't1', raw: { params: { threadId: 't1' } } });
+  await tick();
+  await bridge.stop();
+
+  assert.match(telegram.sent.at(-1).text, /Status: Codex task complete/);
+  assert.match(telegram.sent.at(-1).text, /7 queued items/);
+  assert.equal(telegram.sent.at(-1).priority, 'high');
+});
+
+test('control events without text do not send debug notices', async () => {
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('t1', 44, 'One');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex();
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  for (const method of ['turn/started', 'warning', 'item/started', 'item/completed']) {
+    codex.emit('event', { method, threadId: 't1', raw: { params: { threadId: 't1' } } });
+  }
+  await tick();
+  await bridge.stop();
+
+  assert.deepEqual(telegram.sent, []);
+});
+
+test('message-like app-server events without text send one debug notice', async () => {
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('t1', 44, 'One');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex();
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  codex.emit('event', {
+    method: 'item/completed',
+    threadId: 't1',
+    raw: { params: { threadId: 't1', item: { type: 'agentMessage' } } },
+  });
+  await tick();
+  await bridge.stop();
+
+  assert.match(telegram.sent.at(-1).text, /app-server event had no mirrorable text/);
+  assert.match(telegram.sent.at(-1).text, /item\/completed/);
 });
 
 test('topic replies route to the mapped Codex thread', async () => {

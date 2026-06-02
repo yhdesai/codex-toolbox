@@ -69,6 +69,22 @@ test('edits message text', async () => {
   assert.equal(calls[0].body.text, 'updated');
 });
 
+test('ignores Telegram no-op edit responses', async () => {
+  const client = new TelegramClient({
+    token: 'token',
+    fetchImpl: async () => ({
+      ok: false,
+      json: async () => ({
+        ok: false,
+        error_code: 400,
+        description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same',
+      }),
+    }),
+  });
+
+  await assert.doesNotReject(() => client.editMessageText({ chatId: -1001, messageId: 12, text: 'same' }));
+});
+
 test('paces queued group sends', async () => {
   const calls = [];
   const client = new TelegramClient({
@@ -89,6 +105,26 @@ test('paces queued group sends', async () => {
   assert.equal(calls.length, 2);
   assert.ok(calls[1].at - calls[0].at >= 15);
   assert.ok(Date.now() - startedAt >= 15);
+});
+
+test('high priority sends jump ahead of normal backlog', async () => {
+  const calls = [];
+  const client = new TelegramClient({
+    token: 'token',
+    minGroupIntervalMs: 5,
+    fetchImpl: async (url, options) => {
+      calls.push(JSON.parse(options.body).text);
+      return { ok: true, json: async () => ({ ok: true, result: { message_id: calls.length } }) };
+    },
+  });
+
+  await Promise.all([
+    client.sendMessage({ chatId: -1001, text: 'first' }),
+    client.sendMessage({ chatId: -1001, text: 'second' }),
+    client.sendMessage({ chatId: -1001, text: 'done', priority: 'high' }),
+  ]);
+
+  assert.deepEqual(calls, ['first', 'done', 'second']);
 });
 
 test('retries Telegram 429 responses after retry_after', async () => {

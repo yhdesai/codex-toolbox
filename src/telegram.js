@@ -24,7 +24,8 @@ export class TelegramClient extends EventEmitter {
     this.minGroupIntervalMs = Math.max(0, Number(minGroupIntervalMs) || 0);
     this.minGlobalIntervalMs = Math.max(0, Number(minGlobalIntervalMs) || 0);
     this.retryBufferMs = Math.max(0, Number(retryBufferMs) || 0);
-    this.queue = Promise.resolve();
+    this.queue = [];
+    this.processingQueue = false;
     this.nextGlobalSendAt = 0;
     this.nextChatSendAt = new Map();
   }
@@ -60,6 +61,9 @@ export class TelegramClient extends EventEmitter {
 
     if (!response.ok || !response.body?.ok) {
       const message = response.body?.description || `${method} failed with HTTP ${response.status}`;
+      if (method === 'editMessageText' && /message is not modified/i.test(message)) {
+        return true;
+      }
       const error = new Error(message);
       error.response = response.body;
       error.retryAfter = response.body?.parameters?.retry_after;
@@ -91,16 +95,16 @@ export class TelegramClient extends EventEmitter {
     }, { chatId });
   }
 
-  async sendMessage({ chatId, messageThreadId = null, text, replyMarkup = null }) {
+  async sendMessage({ chatId, messageThreadId = null, text, replyMarkup = null, priority = 'normal' }) {
     const results = [];
     for (const chunk of chunkTelegramText(text)) {
-      results.push(await this.sendMessageChunk({ chatId, messageThreadId, text: chunk, replyMarkup }));
+      results.push(await this.sendMessageChunk({ chatId, messageThreadId, text: chunk, replyMarkup, priority }));
       replyMarkup = null;
     }
     return results;
   }
 
-  async sendMessageChunk({ chatId, messageThreadId = null, text, replyMarkup = null }) {
+  async sendMessageChunk({ chatId, messageThreadId = null, text, replyMarkup = null, priority = 'normal' }) {
     const payload = {
       chat_id: chatId,
       text,
@@ -108,10 +112,10 @@ export class TelegramClient extends EventEmitter {
     };
     if (messageThreadId != null) payload.message_thread_id = Number(messageThreadId);
     if (replyMarkup) payload.reply_markup = replyMarkup;
-    return this.queuedApi('sendMessage', payload, { chatId });
+    return this.queuedApi('sendMessage', payload, { chatId, priority });
   }
 
-  async editMessageText({ chatId, messageId, text, replyMarkup = null }) {
+  async editMessageText({ chatId, messageId, text, replyMarkup = null, priority = 'normal' }) {
     const payload = {
       chat_id: chatId,
       message_id: Number(messageId),
@@ -119,7 +123,7 @@ export class TelegramClient extends EventEmitter {
       disable_web_page_preview: true,
     };
     if (replyMarkup) payload.reply_markup = replyMarkup;
-    return this.queuedApi('editMessageText', payload, { chatId });
+    return this.queuedApi('editMessageText', payload, { chatId, priority });
   }
 
   async answerCallbackQuery(callbackQueryId, text = null) {
@@ -133,11 +137,37 @@ export class TelegramClient extends EventEmitter {
     return this.api('setMyCommands', { commands });
   }
 
-  async queuedApi(method, payload, { chatId = null } = {}) {
-    const run = () => this.#sendQueuedApi(method, payload, chatId);
-    const promise = this.queue.then(run, run);
-    this.queue = promise.catch(() => {});
-    return promise;
+  pendingOutboundCount() {
+    return this.queue.length + (this.processingQueue ? 1 : 0);
+  }
+
+  async queuedApi(method, payload, { chatId = null, priority = 'normal' } = {}) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ method, payload, chatId, priority, resolve, reject });
+      this.#drainQueue();
+    });
+  }
+
+  async #drainQueue() {
+    if (this.processingQueue) return;
+    this.processingQueue = true;
+    try {
+      while (this.queue.length) {
+        const request = this.queue.splice(this.#nextRequestIndex(), 1)[0];
+        try {
+          request.resolve(await this.#sendQueuedApi(request.method, request.payload, request.chatId));
+        } catch (error) {
+          request.reject(error);
+        }
+      }
+    } finally {
+      this.processingQueue = false;
+    }
+  }
+
+  #nextRequestIndex() {
+    const highPriorityIndex = this.queue.findIndex((request) => request.priority === 'high');
+    return highPriorityIndex >= 0 ? highPriorityIndex : 0;
   }
 
   async #sendQueuedApi(method, payload, chatId) {

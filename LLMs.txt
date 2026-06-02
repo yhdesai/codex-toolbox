@@ -12,6 +12,7 @@ Repository URL: https://github.com/yhdesai/codex-toolbox
 - Routes Telegram/Discord replies from allowlisted users back into the mapped Codex thread.
 - Posts Codex approval requests with inline approve/decline/cancel buttons.
 - Tails Codex CLI session JSONL files for CLI-created sessions that do not stream live app-server item events to this bridge process.
+- Sends Codex completion/status notices through a high-priority Telegram queue so long transcript backlogs do not hide that a task is done.
 
 ## Files To Read First
 

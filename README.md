@@ -13,6 +13,7 @@ This project is intended for Codex users only right now. The easiest setup path 
 - Chat replies route back to the matching Codex thread.
 - `/new` or `!codex new` creates a new Codex thread and chat destination.
 - CLI-created Codex sessions are detected and mirrored.
+- Codex completion notices are sent with high priority so long transcript backlogs do not hide that a task is done.
 - Optional Watch API for iPhone/watchOS clients to start Codex sessions and poll compact progress.
 - Allowlist-based Telegram and Discord control.
 - Inline approve, decline, and cancel buttons for Codex approval requests.
@@ -356,7 +357,7 @@ sed -n '1,220p' ~/.codex-toolbox.json
 Common issues:
 
 - `Bad Request: not enough rights to create a topic`: make the bot an admin with forum topic permissions, then run `/bind` again.
-- `Too Many Requests: retry after N`: Telegram is rate-limiting topic or message creation. The bridge queues outbound Telegram calls, paces group sends, and retries automatically after Telegram's requested delay.
+- `Too Many Requests: retry after N`: Telegram is rate-limiting topic or message creation. The bridge queues outbound Telegram calls, paces group sends, and retries automatically after Telegram's requested delay. Completion/status notices jump ahead of normal transcript messages, so a long backlog can keep flushing after the task is already marked complete.
 - No Telegram response from a user: check that the user's numeric Telegram id is included in `TELEGRAM_ALLOWED_USER_IDS`.
 - Message in group gets guidance instead of routing: send it inside a mapped forum topic, not the general group.
 - CLI session topic appears but messages do not: run `/status` or `/resync`; the bridge tails mapped CLI session files on the discovery poll interval.
