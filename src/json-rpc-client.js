@@ -96,7 +96,7 @@ export class JsonRpcClient extends EventEmitter {
     try {
       message = JSON.parse(line);
     } catch (error) {
-      this.emit('error', new Error(`Invalid JSON-RPC line: ${line}`));
+      this.emit('stderr', `Ignoring invalid JSON-RPC line: ${truncateLine(line)}\n`);
       return;
     }
 
@@ -130,4 +130,9 @@ function rpcError(error) {
   result.code = error?.code;
   result.data = error?.data;
   return result;
+}
+
+function truncateLine(line, maxLength = 500) {
+  if (line.length <= maxLength) return line;
+  return `${line.slice(0, maxLength)}...`;
 }

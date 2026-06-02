@@ -17,6 +17,7 @@ const PM2_LOG_TAIL_BYTES = 64 * 1024;
 const DEBUG_NOTICE_THROTTLE_MS = 60 * 1000;
 const GLOBAL_ECHO_SUPPRESSION_KEY = '*';
 const DEFAULT_PROJECTS_ROOT = join(homedir(), 'projects-shiprdev');
+const PROJECT_CONTAINER_SUFFIXES = ['.parent', '.erp'];
 const NEW_THREAD_SELECTION_TTL_MS = 15 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 const TELEGRAM_COMMANDS = [
@@ -40,6 +41,7 @@ export class CodexTelegramTopicBridge {
     this.allowedUserIds = new Set(allowedUserIds.map((id) => String(id)));
     this.discoveryTimer = null;
     this.subscribedThreads = new Set();
+    this.pendingResumeThreads = new Set();
     this.topicCreationFailures = new Set();
     this.lastTopicCreationFailure = null;
     this.topicCreationPausedUntilMs = 0;
@@ -113,9 +115,11 @@ export class CodexTelegramTopicBridge {
       this.knownThreadUpdatedAt.set(threadKey, updatedAt);
 
       if (hasMappedTopic && !this.subscribedThreads.has(threadKey)) {
-        await this.codex.resumeThread(threadId);
-        this.subscribedThreads.add(threadKey);
-        stats.resumed += 1;
+        if (this.#queueResumeThreadForSubscription(threadId)) {
+          stats.resumed += 1;
+        } else {
+          stats.skipped += 1;
+        }
       }
       if (hasMappedTopic && shouldPollSessionFile && !this.sessionFileOffsets.has(threadKey)) {
         await this.#initializeSessionFileOffset(threadKey, sessionPath, 'end');
@@ -127,9 +131,11 @@ export class CodexTelegramTopicBridge {
           await this.#initializeSessionFileOffset(threadKey, sessionPath, 'start');
         }
         if (topicId && !this.subscribedThreads.has(threadKey)) {
-          await this.codex.resumeThread(threadId);
-          this.subscribedThreads.add(threadKey);
-          stats.resumed += 1;
+          if (this.#queueResumeThreadForSubscription(threadId)) {
+            stats.resumed += 1;
+          } else {
+            stats.skipped += 1;
+          }
         }
         if (topicId) {
           stats.created += 1;
@@ -384,9 +390,14 @@ export class CodexTelegramTopicBridge {
     await this.state.unmapTopic(message.message_thread_id);
     await this.state.unmapThread(threadId);
     await this.state.mapThread(threadId, message.message_thread_id, thread.title ?? thread.name ?? null);
-    await this.codex.resumeThread(threadId);
-    this.subscribedThreads.add(String(threadId));
-    await this.telegram.sendMessage({ chatId: message.chat.id, messageThreadId: message.message_thread_id, text: `Relinked this topic to Codex thread ${threadId}.` });
+    const subscribed = await this.#resumeThreadForSubscription(threadId);
+    await this.telegram.sendMessage({
+      chatId: message.chat.id,
+      messageThreadId: message.message_thread_id,
+      text: subscribed
+        ? `Relinked this topic to Codex thread ${threadId}.`
+        : `Relinked this topic to Codex thread ${threadId}, but subscribing to live updates timed out. Replies can still start a new turn.`,
+    });
   }
 
   async #resync(message) {
@@ -521,29 +532,39 @@ export class CodexTelegramTopicBridge {
       text: 'Select a project for the new Codex session.',
       replyMarkup: inlineKeyboard([
         ...projects.map((project) => ({
-          text: project.name,
+          text: project.label,
           callback_data: `new:project:${selectionId}:${project.index}`,
         })),
         { text: 'Help', callback_data: `new:help:${selectionId}` },
-      ]),
+      ], 1),
     });
   }
 
   async #showWorktreePicker(callback, selection, project) {
-    selection.project = project.name;
+    selection.project = project.label;
     selection.projectPath = project.path;
-    const worktrees = await listWorktrees(project.path);
-    const buttons = worktrees.map((worktree) => ({
+    selection.projectIsContainer = Boolean(project.isContainer);
+    const worktrees = project.isContainer ? [] : await listWorktrees(project.path);
+    const buttons = [];
+    if (project.isContainer) {
+      buttons.push({
+        text: `Use ${project.label} parent folder`,
+        callback_data: `new:project-root:${selection.id}`,
+      });
+    }
+    buttons.push(...worktrees.map((worktree) => ({
       text: worktree.name,
       callback_data: `new:worktree:${selection.id}:${worktree.index}`,
-    }));
-    buttons.push({ text: 'Create new worktree', callback_data: `new:create-worktree:${selection.id}` });
+    })));
+    if (!project.isContainer) {
+      buttons.push({ text: 'Create new worktree', callback_data: `new:create-worktree:${selection.id}` });
+    }
     buttons.push({ text: 'Help', callback_data: `new:help:${selection.id}` });
     await this.telegram.sendMessage({
       chatId: selection.chatId,
       messageThreadId: selection.messageThreadId,
-      text: `Project: ${project.name}\nSelect a worktree.`,
-      replyMarkup: inlineKeyboard(buttons),
+      text: `Project: ${project.label}\n${project.isContainer ? 'Select where to start.' : 'Select a worktree.'}`,
+      replyMarkup: inlineKeyboard(buttons, 1),
     });
     await this.telegram.answerCallbackQuery(callback.id, 'Project selected.');
   }
@@ -565,6 +586,15 @@ export class CodexTelegramTopicBridge {
         return;
       }
       await this.#showWorktreePicker(callback, selection, project);
+      return;
+    }
+    if (action === 'project-root') {
+      await this.telegram.answerCallbackQuery(callback.id, 'Creating Codex topic.');
+      await this.#createThreadAndTopic({
+        title: selection.title || selection.project,
+        cwd: selection.projectPath,
+      });
+      this.newThreadSelections.delete(selection.id);
       return;
     }
     if (action === 'worktree') {
@@ -656,9 +686,31 @@ export class CodexTelegramTopicBridge {
     const threadId = await this.codex.createThread(title, { cwd });
     const topicId = await this.telegram.createForumTopic(this.state.boundChatId, title);
     await this.state.mapThread(threadId, topicId, title);
-    await this.codex.resumeThread(threadId);
-    this.subscribedThreads.add(String(threadId));
+    await this.#resumeThreadForSubscription(threadId);
     await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId: topicId, text: `Created Codex thread ${threadId}\nDirectory: ${cwd}` });
+  }
+
+  async #resumeThreadForSubscription(threadId) {
+    const threadKey = String(threadId);
+    try {
+      await this.codex.resumeThread(threadId);
+      this.subscribedThreads.add(threadKey);
+      return true;
+    } catch (error) {
+      await this.#rememberError(`resume Codex thread ${threadKey}: ${error.message}`);
+      this.logger.warn?.(`Could not resume Codex thread ${threadKey}: ${error.message}`);
+      return false;
+    }
+  }
+
+  #queueResumeThreadForSubscription(threadId) {
+    const threadKey = String(threadId);
+    if (this.subscribedThreads.has(threadKey) || this.pendingResumeThreads.has(threadKey)) return false;
+    this.pendingResumeThreads.add(threadKey);
+    this.#resumeThreadForSubscription(threadId)
+      .catch((error) => this.#logError(error))
+      .finally(() => this.pendingResumeThreads.delete(threadKey));
+    return true;
   }
 
   #rememberNewThreadSelection(selection) {
@@ -690,6 +742,10 @@ export class CodexTelegramTopicBridge {
     }
     if (this.state.data.paused?.mirroring) {
       await this.#debugMirrorSkip(event.threadId, 'mirroring is paused', event.method);
+      return;
+    }
+    if (isCompletionEvent(event)) {
+      await this.#sendCompletionNotice(event.threadId, 'app-server turn completed');
       return;
     }
     if (await this.#streamAgentMessageDelta(event)) return;
@@ -779,7 +835,11 @@ export class CodexTelegramTopicBridge {
         await this.#debugMirrorSkip(threadId, 'no Telegram topic is mapped for this Codex thread');
         return;
       }
-      await this.#sendMirroredMessage(threadId, messageThreadId, text);
+      if (rendered.priority === 'high') {
+        await this.telegram.sendMessage({ chatId: this.state.boundChatId, messageThreadId, text, priority: 'high' });
+      } else {
+        await this.#sendMirroredMessage(threadId, messageThreadId, text);
+      }
     }
   }
 
@@ -1019,6 +1079,21 @@ export class CodexTelegramTopicBridge {
     });
   }
 
+  async #sendCompletionNotice(threadId, reason, detail = null) {
+    const messageThreadId = this.state.getTopicForThread(threadId);
+    if (!this.state.boundChatId || !messageThreadId) return;
+    const pending = typeof this.telegram.pendingOutboundCount === 'function'
+      ? this.telegram.pendingOutboundCount()
+      : 0;
+    const backlog = pending > 0 ? `\nTelegram backlog still sending: ${pending} queued item${pending === 1 ? '' : 's'}.` : '';
+    await this.telegram.sendMessage({
+      chatId: this.state.boundChatId,
+      messageThreadId,
+      text: `Status: Codex task complete.${detail ? `\n${detail}` : ''}${backlog}\nReason: ${reason}`,
+      priority: 'high',
+    });
+  }
+
   #rememberMirroredMessage(threadId, text, options = {}) {
     const normalizedText = normalizeText(text);
     if (!normalizedText) return false;
@@ -1206,10 +1281,30 @@ async function listProjects() {
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
   const projects = [];
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'codex-sync') continue;
+    if (!isProjectDirectoryEntry(entry)) continue;
     const projectPath = join(root, entry.name);
-    const worktrees = await listWorktrees(projectPath);
-    if (worktrees.length) projects.push({ name: entry.name, path: projectPath });
+    if (isProjectContainer(entry.name)) {
+      projects.push({
+        name: entry.name,
+        label: entry.name,
+        path: projectPath,
+        isContainer: true,
+      });
+      const childEntries = await readdir(projectPath, { withFileTypes: true }).catch(() => []);
+      for (const child of childEntries) {
+        if (!isProjectDirectoryEntry(child)) continue;
+        const childPath = join(projectPath, child.name);
+        if (await hasSelectableWorktree(childPath)) {
+          projects.push({
+            name: `${entry.name}/${child.name}`,
+            label: `${entry.name}/${child.name}`,
+            path: childPath,
+          });
+        }
+      }
+      continue;
+    }
+    if (await hasSelectableWorktree(projectPath)) projects.push({ name: entry.name, label: entry.name, path: projectPath });
   }
   return projects
     .sort((a, b) => a.name.localeCompare(b.name))
@@ -1228,6 +1323,9 @@ async function listWorktrees(projectPath) {
     const worktreePath = join(projectPath, entry.name);
     if (await isGitWorktree(worktreePath)) worktrees.push({ name: entry.name, path: worktreePath });
   }
+  if (!worktrees.length && await isGitWorktree(projectPath)) {
+    worktrees.push({ name: await currentGitBranch(projectPath), path: projectPath });
+  }
   return worktrees
     .sort((a, b) => {
       if (a.name === 'main') return -1;
@@ -1239,12 +1337,34 @@ async function listWorktrees(projectPath) {
     .map((worktree, index) => ({ ...worktree, index }));
 }
 
+function isProjectDirectoryEntry(entry) {
+  return entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'codex-sync' && entry.name !== 'node_modules';
+}
+
+function isProjectContainer(name) {
+  return PROJECT_CONTAINER_SUFFIXES.some((suffix) => name.endsWith(suffix));
+}
+
+async function hasSelectableWorktree(projectPath) {
+  return (await listWorktrees(projectPath)).length > 0;
+}
+
 async function isGitWorktree(dir) {
   try {
     await execFileAsync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { timeout: 5000 });
     return true;
   } catch {
     return false;
+  }
+}
+
+async function currentGitBranch(dir) {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 5000 });
+    const branch = stdout.trim();
+    return branch && branch !== 'HEAD' ? branch : basename(dir);
+  } catch {
+    return basename(dir);
   }
 }
 
@@ -1265,10 +1385,10 @@ async function findWorktreeSource(projectPath) {
   return (worktrees.find((worktree) => worktree.name === 'main') ?? worktrees[0])?.path ?? null;
 }
 
-function inlineKeyboard(buttons) {
+function inlineKeyboard(buttons, columns = 2) {
   const rows = [];
-  for (let index = 0; index < buttons.length; index += 2) {
-    rows.push(buttons.slice(index, index + 2));
+  for (let index = 0; index < buttons.length; index += columns) {
+    rows.push(buttons.slice(index, index + columns));
   }
   return { inline_keyboard: rows };
 }
@@ -1348,6 +1468,11 @@ function renderSessionLogLine(line) {
   if (payload.type === 'stream_error' || payload.type === 'error') return { text: `Error\n${payload.message ?? payload.error ?? 'Unknown error'}` };
   if (payload.type === 'exec_command_begin') return { text: `Tool: ${payload.command ?? 'command'}` };
   if (payload.type === 'exec_command_end') return { text: `Tool: ${payload.command ?? 'command'}${payload.exit_code == null ? '' : ` (${payload.exit_code})`}` };
+  if (payload.type === 'task_complete') {
+    const duration = formatDuration(payload.duration_ms);
+    const detail = duration ? `\nDuration: ${duration}` : '';
+    return { text: `Status: Codex task complete.${detail}`, priority: 'high' };
+  }
   return { text: null };
 }
 
@@ -1376,5 +1501,28 @@ function extractResponseItemText(content) {
 function isMessageLikeCodexEvent(event) {
   const params = event.raw?.params ?? {};
   const type = params.type ?? params.item?.type ?? '';
-  return /item|message|turn/.test(event.method) || /Message$/i.test(type) || params.text || params.message || params.item?.text;
+  const role = params.role ?? params.item?.role ?? '';
+  return type === 'userMessage'
+    || type === 'agentMessage'
+    || role === 'user'
+    || role === 'assistant'
+    || typeof params.text === 'string'
+    || typeof params.message === 'string'
+    || typeof params.item?.text === 'string'
+    || Array.isArray(params.content)
+    || Array.isArray(params.item?.content);
+}
+
+function isCompletionEvent(event) {
+  return /turn\/(completed|done)$/i.test(event.method);
+}
+
+function formatDuration(durationMs) {
+  const ms = Number(durationMs);
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  return `${minutes}m ${seconds}s`;
 }
