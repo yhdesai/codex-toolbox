@@ -1,4 +1,6 @@
 node_modules/
 *.log
+.env
 .codex-toolbox.json
+.codex-toolbox-telegram.json
 .codex-telegram-topic-sync.json

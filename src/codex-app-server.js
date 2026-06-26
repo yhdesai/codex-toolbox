@@ -52,11 +52,16 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async initialize() {
-    await this.client.request('initialize', {
-      clientInfo: { name: 'codex-toolbox', title: null, version: '0.1.0' },
-      capabilities: { experimentalApi: true },
-    });
-    this.client.notify('initialized', {});
+    try {
+      await this.client.request('initialize', {
+        clientInfo: { name: 'codex-toolbox', title: null, version: '0.1.0' },
+        capabilities: { experimentalApi: true },
+      });
+      this.client.notify('initialized', {});
+    } catch (error) {
+      if (isAlreadyInitializedError(error)) return;
+      throw error;
+    }
   }
 
   async listThreads() {
@@ -181,4 +186,8 @@ function dedupeThreads(threads) {
 
 function extractThreadId(value) {
   return value?.threadId ?? value?.thread_id ?? value?.thread?.id ?? value?.id ?? null;
+}
+
+function isAlreadyInitializedError(error) {
+  return error?.code === -32600 && /already initialized/i.test(error.message ?? '');
 }

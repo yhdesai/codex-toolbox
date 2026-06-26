@@ -32,13 +32,14 @@ const TELEGRAM_COMMANDS = [
 ];
 
 export class CodexTelegramTopicBridge {
-  constructor({ codex, telegram, state, pollMs = 5000, logger = console, allowedUserIds = [] }) {
+  constructor({ codex, telegram, state, pollMs = 5000, logger = console, allowedUserIds = [], messageScope = 'all' }) {
     this.codex = codex;
     this.telegram = telegram;
     this.state = state;
     this.pollMs = pollMs;
     this.logger = logger;
     this.allowedUserIds = new Set(allowedUserIds.map((id) => String(id)));
+    this.messageScope = normalizeMessageScope(messageScope);
     this.discoveryTimer = null;
     this.subscribedThreads = new Set();
     this.pendingResumeThreads = new Set();
@@ -163,6 +164,7 @@ export class CodexTelegramTopicBridge {
     const message = update.message;
     if (!message?.text) return;
     if (!this.#isAllowedUser(message.from)) {
+      await this.#sendUnauthorizedUserNotice(message);
       return;
     }
     const command = getCommand(message);
@@ -737,15 +739,16 @@ export class CodexTelegramTopicBridge {
 
   async #mirrorCodexEvent(event) {
     if (!this.state.boundChatId || !event.threadId) return;
+    if (this.#shouldMirrorNoMessages()) return;
     if (this.#consumeTelegramEchoSuppression(event)) {
       return;
     }
     if (this.state.data.paused?.mirroring) {
-      await this.#debugMirrorSkip(event.threadId, 'mirroring is paused', event.method);
+      if (this.#shouldMirrorAllMessages()) await this.#debugMirrorSkip(event.threadId, 'mirroring is paused', event.method);
       return;
     }
     if (isCompletionEvent(event)) {
-      await this.#sendCompletionNotice(event.threadId, 'app-server turn completed');
+      if (this.#shouldMirrorAllMessages()) await this.#sendCompletionNotice(event.threadId, 'app-server turn completed');
       return;
     }
     if (await this.#streamAgentMessageDelta(event)) return;
@@ -753,28 +756,30 @@ export class CodexTelegramTopicBridge {
     if (completedAgentMessage) {
       const messageThreadId = await this.#ensureTopicForThread(event.threadId);
       if (!messageThreadId) {
-        await this.#debugMirrorSkip(event.threadId, 'no Telegram topic is mapped for this Codex thread', event.method);
+        if (this.#shouldMirrorAllMessages()) await this.#debugMirrorSkip(event.threadId, 'no Telegram topic is mapped for this Codex thread', event.method);
         return;
       }
       await this.#finalizeAgentMessageStream(event.threadId, messageThreadId, completedAgentMessage);
       return;
     }
-    const text = renderCodexEvent(event);
+    if (!this.#shouldMirrorAllMessages() && !isUserOrAgentMessageEvent(event)) return;
+    const text = renderCodexEvent(event, { includeMessageType: true });
     if (!text) {
-      if (isMessageLikeCodexEvent(event)) {
+      if (this.#shouldMirrorAllMessages() && isMessageLikeCodexEvent(event)) {
         await this.#debugMirrorSkip(event.threadId, 'app-server event had no mirrorable text', event.method);
       }
       return;
     }
     const messageThreadId = await this.#ensureTopicForThread(event.threadId);
     if (!messageThreadId) {
-      await this.#debugMirrorSkip(event.threadId, 'no Telegram topic is mapped for this Codex thread', event.method);
+      if (this.#shouldMirrorAllMessages()) await this.#debugMirrorSkip(event.threadId, 'no Telegram topic is mapped for this Codex thread', event.method);
       return;
     }
     await this.#sendMirroredMessage(event.threadId, messageThreadId, text);
   }
 
   async #mirrorApprovalRequest(request) {
+    if (!this.#shouldMirrorAllMessages()) return;
     if (!this.state.boundChatId) return;
     const messageThreadId = request.threadId ? this.state.getTopicForThread(request.threadId) : null;
     if (!messageThreadId) return;
@@ -783,15 +788,18 @@ export class CodexTelegramTopicBridge {
     await this.telegram.sendMessage({
       chatId: this.state.boundChatId,
       messageThreadId,
-      text: renderApprovalPrompt(request),
+      text: renderApprovalPrompt(request, { includeMessageType: true }),
       replyMarkup: approvalKeyboard(callbackId, approvalLabels(request)),
     });
   }
 
   async #pollSessionFiles() {
+    if (this.#shouldMirrorNoMessages()) return;
     if (this.state.data.paused?.mirroring) {
-      for (const threadId of this.sessionFilePaths.keys()) {
-        await this.#debugMirrorSkip(threadId, 'session file polling skipped because mirroring is paused');
+      if (this.#shouldMirrorAllMessages()) {
+        for (const threadId of this.sessionFilePaths.keys()) {
+          await this.#debugMirrorSkip(threadId, 'session file polling skipped because mirroring is paused');
+        }
       }
       return;
     }
@@ -821,18 +829,19 @@ export class CodexTelegramTopicBridge {
     this.sessionFileOffsets.set(threadId, raw.length);
     for (const line of chunk.split('\n')) {
       if (!line.trim()) continue;
-      const rendered = renderSessionLogLine(line);
+      const rendered = renderSessionLogLine(line, this.messageScope);
       if (!rendered.text) {
-        if (rendered.debugReason) await this.#debugMirrorSkip(threadId, rendered.debugReason);
+        if (this.#shouldMirrorAllMessages() && rendered.debugReason) await this.#debugMirrorSkip(threadId, rendered.debugReason);
         continue;
       }
       const text = rendered.text;
-      if (text.startsWith('User\n') && this.#consumeTextEchoSuppression(threadId, text.slice('User\n'.length))) {
+      const mirroredUserText = mirroredRoleText(text, 'User');
+      if (mirroredUserText && this.#consumeTextEchoSuppression(threadId, mirroredUserText)) {
         continue;
       }
       const messageThreadId = this.state.getTopicForThread(threadId);
       if (!messageThreadId) {
-        await this.#debugMirrorSkip(threadId, 'no Telegram topic is mapped for this Codex thread');
+        if (this.#shouldMirrorAllMessages()) await this.#debugMirrorSkip(threadId, 'no Telegram topic is mapped for this Codex thread');
         return;
       }
       if (rendered.priority === 'high') {
@@ -860,6 +869,18 @@ export class CodexTelegramTopicBridge {
   #isAllowedUser(user) {
     if (this.allowedUserIds.size === 0) return false;
     return user?.id != null && this.allowedUserIds.has(String(user.id));
+  }
+
+  async #sendUnauthorizedUserNotice(message) {
+    const telegramUserId = message.from?.id != null ? String(message.from.id) : '';
+    const text = telegramUserId
+      ? `Telegram user ${telegramUserId} is not allowlisted for this Codex bridge. Add it to TELEGRAM_ALLOWED_USER_IDS and restart the Telegram relay.`
+      : 'Telegram user ID is missing from this update, so the Codex bridge cannot authorize it. Send a command from a normal Telegram user account and make sure TELEGRAM_ALLOWED_USER_IDS is configured.';
+    await this.telegram.sendMessage({
+      chatId: message.chat.id,
+      messageThreadId: message.message_thread_id,
+      text,
+    });
   }
 
   async #ensureTopicForThread(threadId, thread = null) {
@@ -924,6 +945,14 @@ export class CodexTelegramTopicBridge {
     return (this.state.data?.lastErrors ?? []).map((entry) => redact(entry.message ?? entry)).filter(Boolean);
   }
 
+  #shouldMirrorAllMessages() {
+    return this.messageScope === 'all';
+  }
+
+  #shouldMirrorNoMessages() {
+    return this.messageScope === 'none';
+  }
+
   async #readDiagnostics() {
     const sections = [
       'Codex Toolbox diagnostics',
@@ -973,11 +1002,11 @@ export class CodexTelegramTopicBridge {
     const buffered = this.agentMessageBuffers.get(itemId);
     this.agentMessageBuffers.delete(itemId);
     const text = (buffered || item.text || '').trim();
-    return text ? { itemId, text: `Codex\n${text}` } : null;
+    return text ? { itemId, text: withMessageType(item.type, `Codex\n${text}`) } : null;
   }
 
   async #updateAgentMessageStream(threadId, messageThreadId, itemId, text, force) {
-    const renderedText = `Codex\n${text.trim()}`;
+    const renderedText = withMessageType('agentMessage', `Codex\n${text.trim()}`);
     if (!renderedText.trim()) {
       await this.#debugMirrorSkip(threadId, 'agent stream delta was empty');
       return;
@@ -1075,7 +1104,7 @@ export class CodexTelegramTopicBridge {
     await this.telegram.sendMessage({
       chatId: this.state.boundChatId,
       messageThreadId,
-      text: `Debug: Codex message not sent to Telegram.\nReason: ${reason}${detail ? `\nCheck: ${detail}` : ''}`,
+      text: withMessageType('debug', `Debug: Codex message not sent to Telegram.\nReason: ${reason}${detail ? `\nCheck: ${detail}` : ''}`),
     });
   }
 
@@ -1089,13 +1118,13 @@ export class CodexTelegramTopicBridge {
     await this.telegram.sendMessage({
       chatId: this.state.boundChatId,
       messageThreadId,
-      text: `Status: Codex task complete.${detail ? `\n${detail}` : ''}${backlog}\nReason: ${reason}`,
+      text: withMessageType('task_complete', `Status: Codex task complete.${detail ? `\n${detail}` : ''}${backlog}\nReason: ${reason}`),
       priority: 'high',
     });
   }
 
   #rememberMirroredMessage(threadId, text, options = {}) {
-    const normalizedText = normalizeText(text);
+    const normalizedText = normalizeMirroredMessageText(text);
     if (!normalizedText) return false;
     const key = String(threadId);
     const now = Date.now();
@@ -1188,6 +1217,56 @@ function isAfterStartup(value, startedAtMs) {
 
 function normalizeText(value) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+}
+
+function normalizeMirroredMessageText(value) {
+  const text = typeof value === 'string' ? value : '';
+  const lines = text.split('\n');
+  if (lines.length > 1 && isMirrorBodyStart(lines[1])) {
+    return normalizeText(lines.slice(1).join('\n'));
+  }
+  return normalizeText(text);
+}
+
+function isMirrorBodyStart(line) {
+  return line === 'User'
+    || line === 'Codex'
+    || line === 'Plan'
+    || line === 'Error'
+    || line.startsWith('Tool')
+    || line.startsWith('Status:')
+    || line.startsWith('Debug:');
+}
+
+function withMessageType(type, text) {
+  const normalizedType = String(type || 'message').trim() || 'message';
+  return `${normalizedType}\n${text}`;
+}
+
+function mirroredRoleText(text, role) {
+  const lines = String(text ?? '').split('\n');
+  const roleIndex = lines[0] === role ? 0 : lines[1] === role ? 1 : -1;
+  if (roleIndex < 0) return null;
+  return lines.slice(roleIndex + 1).join('\n');
+}
+
+function isUserOrAgentMessageEvent(event) {
+  const params = event.raw?.params ?? {};
+  const item = params.item ?? {};
+  const type = item.type ?? params.type ?? '';
+  const role = item.role ?? params.role ?? '';
+  return type === 'userMessage'
+    || type === 'agentMessage'
+    || role === 'user'
+    || role === 'assistant';
+}
+
+function normalizeMessageScope(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['all', 'everything', '*'].includes(normalized)) return 'all';
+  if (['none', 'off', 'disabled', 'false', '0'].includes(normalized)) return 'none';
+  if (['conversation', 'conversation_only', 'conversation-only', 'user_agent', 'user-agent', 'users_agents', 'users-agents', 'messages'].includes(normalized)) return 'conversation';
+  return 'conversation';
 }
 
 function isRateLimited(error) {
@@ -1444,7 +1523,9 @@ async function readFileTail(path, maxBytes) {
   }
 }
 
-function renderSessionLogLine(line) {
+function renderSessionLogLine(line, messageScope = 'all') {
+  messageScope = normalizeMessageScope(messageScope);
+  if (messageScope === 'none') return { text: null };
   let entry;
   try {
     entry = JSON.parse(line);
@@ -1452,36 +1533,74 @@ function renderSessionLogLine(line) {
     return { text: null, debugReason: 'session log line was not valid JSON' };
   }
   const payload = entry.payload ?? {};
-  if (entry.type === 'response_item') return renderResponseItem(payload);
+  if (entry.type === 'response_item') return renderResponseItem(payload, messageScope);
   if (entry.type !== 'event_msg') return { text: null };
   if (payload.type === 'user_message') {
     return payload.message
-      ? { text: `User\n${payload.message}` }
+      ? { text: withMessageType(payload.type, `User\n${payload.message}`) }
       : { text: null, debugReason: 'session user_message had no message text' };
   }
   if (payload.type === 'agent_message') {
     return payload.message
-      ? { text: `Codex\n${payload.message}` }
+      ? { text: withMessageType(payload.type, `Codex\n${payload.message}`) }
       : { text: null, debugReason: 'session agent_message had no message text' };
   }
-  if (payload.type === 'plan_update' && payload.explanation) return { text: `Plan\n${payload.explanation}` };
-  if (payload.type === 'stream_error' || payload.type === 'error') return { text: `Error\n${payload.message ?? payload.error ?? 'Unknown error'}` };
-  if (payload.type === 'exec_command_begin') return { text: `Tool: ${payload.command ?? 'command'}` };
-  if (payload.type === 'exec_command_end') return { text: `Tool: ${payload.command ?? 'command'}${payload.exit_code == null ? '' : ` (${payload.exit_code})`}` };
+  if (messageScope !== 'all') return { text: null };
+  if (payload.type === 'plan_update' && payload.explanation) return { text: withMessageType(payload.type, `Plan\n${payload.explanation}`) };
+  if (payload.type === 'stream_error' || payload.type === 'error') return { text: withMessageType(payload.type, `Error\n${payload.message ?? payload.error ?? 'Unknown error'}`) };
+  if (payload.type === 'exec_command_begin') return { text: withMessageType(payload.type, `Tool: ${payload.command ?? 'command'}`) };
+  if (payload.type === 'exec_command_end') {
+    return {
+      text: withMessageType(
+        payload.type,
+        [`Tool: ${payload.command ?? 'command'}${payload.exit_code == null ? '' : ` (${payload.exit_code})`}`, formatToolOutput(payload)].filter(Boolean).join('\n'),
+      ),
+    };
+  }
+  if (payload.type === 'patch_apply_end') {
+    return { text: withMessageType(payload.type, ['Tool output: apply_patch', formatToolOutput(payload)].filter(Boolean).join('\n')) };
+  }
   if (payload.type === 'task_complete') {
     const duration = formatDuration(payload.duration_ms);
     const detail = duration ? `\nDuration: ${duration}` : '';
-    return { text: `Status: Codex task complete.${detail}`, priority: 'high' };
+    return { text: withMessageType(payload.type, `Status: Codex task complete.${detail}`), priority: 'high' };
   }
   return { text: null };
 }
 
-function renderResponseItem(payload) {
+function renderResponseItem(payload, messageScope = 'all') {
+  messageScope = normalizeMessageScope(messageScope);
+  if (messageScope === 'none') return { text: null };
+  if (messageScope === 'all' && payload.type === 'custom_tool_call') {
+    const status = payload.status ? ` (${payload.status})` : '';
+    return { text: withMessageType(payload.type, `Tool call: ${payload.name ?? 'tool'}${status}`) };
+  }
+  if (messageScope === 'all' && payload.type === 'custom_tool_call_output') {
+    return { text: withMessageType(payload.type, ['Tool output', truncateText(payload.output)].filter(Boolean).join('\n')) };
+  }
   if (payload.type !== 'message') return { text: null };
   const role = payload.role === 'user' ? 'User' : payload.role === 'assistant' ? 'Codex' : null;
   if (!role) return { text: null, debugReason: `response_item message had unsupported role: ${payload.role ?? 'missing'}` };
   const text = extractResponseItemText(payload.content);
-  return text ? { text: `${role}\n${text}` } : { text: null, debugReason: `response_item ${payload.role} message had no text content` };
+  return text ? { text: withMessageType(`response_item/${payload.type}`, `${role}\n${text}`) } : { text: null, debugReason: `response_item ${payload.role} message had no text content` };
+}
+
+function formatToolOutput(payload) {
+  const stdout = truncateText(payload.stdout);
+  const stderr = truncateText(payload.stderr);
+  const output = truncateText(payload.output);
+  return [
+    stdout ? `stdout:\n${stdout}` : '',
+    stderr ? `stderr:\n${stderr}` : '',
+    output ? `output:\n${output}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function truncateText(value, maxLength = 1800) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return null;
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 20).trimEnd()}\n... truncated ...`;
 }
 
 function extractResponseItemText(content) {

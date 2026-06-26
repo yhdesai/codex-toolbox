@@ -1,21 +1,22 @@
-export function renderCodexEvent(event) {
+export function renderCodexEvent(event, options = {}) {
   const { method, raw } = event;
   const params = raw.params ?? {};
+  const includeMessageType = Boolean(options.includeMessageType);
 
   if (isReasoning(method, params)) return null;
   if (method === 'thread/status/changed') return null;
   if (method === 'turn/started' || method === 'turn/completed') return null;
+  if (isToolEvent(method, params)) return conciseToolSummary(method, params, { includeMessageType });
 
   const text = extractText(params);
   if (/item|message|turn/.test(method) && text) {
     const role = params.role ?? params.item?.role ?? inferRole(method, params);
-    return `${labelRole(role)}\n${text}`;
+    return renderWithType(messageType(method, params), `${labelRole(role)}\n${text}`, includeMessageType);
   }
 
-  if (/plan/i.test(method) && text) return `Plan\n${text}`;
-  if (/error|failed/i.test(method)) return `Error\n${text || params.message || method}`;
-  if (/interrupted|cancelled|canceled/i.test(method)) return `Status: ${humanize(method)}`;
-  if (/exec|command|tool/i.test(method)) return conciseToolSummary(method, params);
+  if (/plan/i.test(method) && text) return renderWithType(messageType(method, params), `Plan\n${text}`, includeMessageType);
+  if (/error|failed/i.test(method)) return renderWithType(messageType(method, params), `Error\n${text || params.message || method}`, includeMessageType);
+  if (/interrupted|cancelled|canceled/i.test(method)) return renderWithType(messageType(method, params), `Status: ${humanize(method)}`, includeMessageType);
   return null;
 }
 
@@ -28,14 +29,15 @@ export function extractUserMessageText(event) {
   return extractText(params);
 }
 
-export function renderApprovalPrompt(request) {
+export function renderApprovalPrompt(request, options = {}) {
   const params = request.params ?? {};
+  const includeMessageType = Boolean(options.includeMessageType);
   const command = params.command ?? params.cmd ?? params.arguments?.command;
   const file = params.file ?? params.path ?? params.arguments?.path;
   const permission = params.permission ?? params.sandbox_permissions ?? params.arguments?.permission;
   const title = command ? 'Command approval requested' : file ? 'File approval requested' : 'Approval requested';
   const detail = command || file || permission || params.message || request.method;
-  return `${title}\n${detail}\n\nUse the buttons below to approve, decline, or cancel. Destructive or broad approvals should only be accepted after checking the details.`;
+  return renderWithType(request.method ?? 'approval_request', `${title}\n${detail}\n\nUse the buttons below to approve, decline, or cancel. Destructive or broad approvals should only be accepted after checking the details.`, includeMessageType);
 }
 
 export function approvalLabels(request) {
@@ -55,6 +57,11 @@ function isReasoning(method, params) {
   return /reasoning|thought|chain/i.test(`${method} ${type}`);
 }
 
+function isToolEvent(method, params) {
+  const type = params.type ?? params.item?.type ?? '';
+  return /exec|command|tool/i.test(`${method} ${type}`);
+}
+
 function extractText(params) {
   const candidates = [
     params.text,
@@ -63,8 +70,12 @@ function extractText(params) {
     params.item?.text,
     params.item?.content?.text,
     params.item?.message,
+    params.item?.output,
     params.item?.content,
     params.content,
+    params.output,
+    params.stdout,
+    params.stderr,
   ];
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
@@ -91,12 +102,34 @@ function labelRole(role) {
   return 'Codex';
 }
 
-function conciseToolSummary(method, params) {
-  const name = params.name ?? params.tool ?? params.command ?? method;
-  const status = params.status ? ` (${params.status})` : '';
-  return `Tool: ${name}${status}`;
+function conciseToolSummary(method, params, { includeMessageType = false } = {}) {
+  const name = params.name ?? params.item?.name ?? params.tool ?? params.command ?? method;
+  const statusValue = params.status ?? params.item?.status;
+  const status = statusValue ? ` (${statusValue})` : '';
+  const output = truncateText(params.output ?? params.stdout ?? params.stderr ?? params.item?.output);
+  return renderWithType(messageType(method, params), [`Tool: ${name}${status}`, output ? `Output:\n${output}` : ''].filter(Boolean).join('\n'), includeMessageType);
 }
 
 function humanize(method) {
   return method.replaceAll('/', ' ');
+}
+
+function messageType(method, params = {}) {
+  return params.item?.type ?? params.type ?? method;
+}
+
+function withMessageType(type, text) {
+  const normalizedType = String(type || 'message').trim() || 'message';
+  return `${normalizedType}\n${text}`;
+}
+
+function renderWithType(type, text, includeMessageType) {
+  return includeMessageType ? withMessageType(type, text) : text;
+}
+
+function truncateText(value, maxLength = 1800) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return null;
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 20).trimEnd()}\n... truncated ...`;
 }

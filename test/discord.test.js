@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
-import { DiscordClient, approvalComponents, getDiscordCommand, getDiscordCommandArgs, sanitizeDiscordName } from '../src/discord.js';
+import { DiscordClient, approvalComponents, formatDiscordMessage, getDiscordCommand, getDiscordCommandArgs, sanitizeDiscordName } from '../src/discord.js';
 
 test('creates Discord categories, channels, messages, and interactions', async () => {
   const calls = [];
@@ -16,6 +16,8 @@ test('creates Discord categories, channels, messages, and interactions', async (
 
   await client.createGuildCategory('guild-1', 'My Project');
   await client.createTextChannel('guild-1', 'Investigate Bug!', 'cat-1');
+  await client.listGuildChannels('guild-1');
+  await client.editChannelName('chan-1', 'Better Name');
   await client.sendMessage({ channelId: 'chan-1', text: 'hello', components: approvalComponents('cb1') });
   await client.createInteractionResponse('interaction-1', 'interaction-token', { type: 4, data: { content: 'ok' } });
 
@@ -26,9 +28,30 @@ test('creates Discord categories, channels, messages, and interactions', async (
   assert.equal(calls[1].body.type, 0);
   assert.equal(calls[1].body.name, 'investigate-bug');
   assert.equal(calls[1].body.parent_id, 'cat-1');
-  assert.equal(calls[2].body.allowed_mentions.parse.length, 0);
-  assert.equal(calls[2].body.components[0].components[0].custom_id, 'approval:cb1:accept');
-  assert.match(calls[3].url, /\/interactions\/interaction-1\/interaction-token\/callback$/);
+  assert.equal(calls[2].method, 'GET');
+  assert.match(calls[2].url, /\/guilds\/guild-1\/channels$/);
+  assert.equal(calls[3].method, 'PATCH');
+  assert.match(calls[3].url, /\/channels\/chan-1$/);
+  assert.equal(calls[3].body.name, 'better-name');
+  assert.equal(calls[4].body.allowed_mentions.parse.length, 0);
+  assert.equal(calls[4].body.content, 'Codex Toolbox - message\n```\nhello\n```');
+  assert.equal(calls[4].body.components[0].components[0].custom_id, 'approval:cb1:accept');
+  assert.match(calls[5].url, /\/interactions\/interaction-1\/interaction-token\/callback$/);
+});
+
+test('formats Discord messages as labeled code snippets', () => {
+  assert.deepEqual(formatDiscordMessage('agentMessage\nCodex\nhello'), [
+    'Codex - agentMessage\n```\nhello\n```',
+  ]);
+  assert.deepEqual(formatDiscordMessage('user_message\nUser\ncontinue'), [
+    'User - user_message\n```\ncontinue\n```',
+  ]);
+  assert.deepEqual(formatDiscordMessage('custom_tool_call_output\nTool output\nExit code: 0'), [
+    'Tool - custom_tool_call_output\n```\nTool output\nExit code: 0\n```',
+  ]);
+  assert.deepEqual(formatDiscordMessage('Created Codex thread 123'), [
+    'Codex Toolbox - message\n```\nCreated Codex thread 123\n```',
+  ]);
 });
 
 test('parses Discord commands and sanitizes names', () => {

@@ -122,7 +122,7 @@ test('mapped CLI session files are tailed for new messages', async () => {
   await bridge.discoverThreads();
   await bridge.stop();
 
-  assert.deepEqual(telegram.sent.map((message) => message.text), ['User\nfrom cli', 'Codex\nfrom assistant']);
+  assert.deepEqual(telegram.sent.map((message) => message.text), ['user_message\nUser\nfrom cli', 'agent_message\nCodex\nfrom assistant']);
 });
 
 test('mapped session files are tailed even when app-server reports vscode source', async () => {
@@ -141,7 +141,7 @@ test('mapped session files are tailed even when app-server reports vscode source
   await bridge.discoverThreads();
   await bridge.stop();
 
-  assert.deepEqual(telegram.sent.map((message) => message.text), ['Codex\nfrom assistant']);
+  assert.deepEqual(telegram.sent.map((message) => message.text), ['agent_message\nCodex\nfrom assistant']);
 });
 
 test('session file tailing mirrors response_item message records', async () => {
@@ -160,7 +160,73 @@ test('session file tailing mirrors response_item message records', async () => {
   await bridge.discoverThreads();
   await bridge.stop();
 
-  assert.deepEqual(telegram.sent.map((message) => message.text), ['Codex\nfrom response item']);
+  assert.deepEqual(telegram.sent.map((message) => message.text), ['response_item/message\nCodex\nfrom response item']);
+});
+
+test('session file tailing mirrors response_item tool records', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-response-tool-'));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, '', 'utf8');
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('tool-thread', 44, 'Tool');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex({ threads: [{ id: 'tool-thread', title: 'Tool', source: 'vscode', path: file, updatedAt: '1' }] });
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
+
+  await bridge.start();
+  await appendFile(file, `${responseToolCallLine('apply_patch')}\n${responseToolOutputLine('Exit code: 0\nOutput:\nSuccess')}\n`, 'utf8');
+  await bridge.discoverThreads();
+  await bridge.stop();
+
+  assert.deepEqual(telegram.sent.map((message) => message.text), [
+    'custom_tool_call\nTool call: apply_patch (completed)',
+    'custom_tool_call_output\nTool output\nExit code: 0\nOutput:\nSuccess',
+  ]);
+});
+
+test('Telegram messageScope=conversation mirrors only user and agent session records', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-conversation-scope-'));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, '', 'utf8');
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('scope-thread', 44, 'Scope');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex({ threads: [{ id: 'scope-thread', title: 'Scope', source: 'vscode', path: file, updatedAt: '1' }] });
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111], messageScope: 'conversation' });
+
+  await bridge.start();
+  await appendFile(file, `${sessionLine('user_message', { message: 'from user' })}\n${responseToolCallLine('apply_patch')}\n${sessionLine('agent_message', { message: 'from assistant' })}\n${sessionLine('task_complete', {})}\n`, 'utf8');
+  await bridge.discoverThreads();
+  await bridge.stop();
+
+  assert.deepEqual(telegram.sent.map((message) => message.text), ['user_message\nUser\nfrom user', 'agent_message\nCodex\nfrom assistant']);
+});
+
+test('Telegram messageScope=none disables mirrored Codex transcript messages', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-toolbox-none-scope-'));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, '', 'utf8');
+  const state = memoryState();
+  await state.bindChat(-100);
+  await state.mapThread('none-thread', 44, 'None');
+  const telegram = fakeTelegram();
+  const codex = fakeCodex({ threads: [{ id: 'none-thread', title: 'None', source: 'vscode', path: file, updatedAt: '1' }] });
+  const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111], messageScope: 'none' });
+
+  await bridge.start();
+  await appendFile(file, `${sessionLine('user_message', { message: 'from user' })}\n${sessionLine('agent_message', { message: 'from assistant' })}\n`, 'utf8');
+  await bridge.discoverThreads();
+  codex.emit('event', {
+    method: 'item/completed',
+    threadId: 'none-thread',
+    raw: { params: { threadId: 'none-thread', item: { id: 'agent-1', type: 'agentMessage', text: 'live assistant' } } },
+  });
+  await tick();
+  await bridge.stop();
+
+  assert.deepEqual(telegram.sent, []);
 });
 
 test('session file tailing sends debug notices for message records without text', async () => {
@@ -226,7 +292,7 @@ test('CLI session tailing does not duplicate messages already mirrored from app-
   await bridge.discoverThreads();
   await bridge.stop();
 
-  assert.deepEqual(telegram.sent.map((message) => message.text), ['Codex\nsame answer']);
+  assert.deepEqual(telegram.sent.map((message) => message.text), ['agentMessage\nCodex\nsame answer']);
 });
 
 test('newly discovered CLI session files mirror existing first turn after topic creation', async () => {
@@ -251,8 +317,8 @@ test('newly discovered CLI session files mirror existing first turn after topic 
   assert.equal(state.getTopicForThread('cli-thread'), 1001);
   assert.deepEqual(telegram.sent.map((message) => message.text), [
     'Linked Codex thread cli-thread',
-    'User\nfirst prompt',
-    'Codex\nfirst answer',
+    'user_message\nUser\nfirst prompt',
+    'agent_message\nCodex\nfirst answer',
   ]);
 });
 
@@ -274,7 +340,7 @@ test('agent message deltas stream into Telegram edits', async () => {
   }
   await tick();
   assert.equal(telegram.sent.length, 1);
-  assert.equal(telegram.sent[0].text, 'Codex\nHi');
+  assert.equal(telegram.sent[0].text, 'agentMessage\nCodex\nHi');
 
   codex.emit('event', {
     method: 'item/completed',
@@ -285,7 +351,7 @@ test('agent message deltas stream into Telegram edits', async () => {
   await bridge.stop();
 
   assert.equal(telegram.sent.length, 1);
-  assert.equal(telegram.edited.at(-1).text, 'Codex\nHi. What do you want?');
+  assert.equal(telegram.edited.at(-1).text, 'agentMessage\nCodex\nHi. What do you want?');
 });
 
 test('thread status changes are not mirrored', async () => {
@@ -503,7 +569,7 @@ test('desktop-originated user messages still mirror with a user label', async ()
   await bridge.stop();
 
   assert.equal(telegram.sent.length, 1);
-  assert.equal(telegram.sent[0].text, 'User\nfrom desktop');
+  assert.equal(telegram.sent[0].text, 'userMessage\nUser\nfrom desktop');
 });
 
 test('topic replies in unmapped topics get a clear error', async () => {
@@ -746,9 +812,9 @@ test('/pause suppresses mirroring but still allows topic replies, and /resume re
   await bridge.stop();
 
   assert.equal(telegram.sent.length >= sentAfterPause, true);
-  assert.equal(telegram.sent.some((message) => message.text === 'Codex\nhidden'), false);
+  assert.equal(telegram.sent.some((message) => message.text === 'agentMessage\nCodex\nhidden'), false);
   assert.deepEqual(codex.sent, [{ threadId: 't1', text: 'continue' }]);
-  assert.equal(telegram.sent.at(-1).text, 'Codex\nvisible');
+  assert.equal(telegram.sent.at(-1).text, 'agentMessage\nCodex\nvisible');
 });
 
 test('/rename updates Telegram, state, and Codex when possible', async () => {
@@ -839,16 +905,22 @@ test('topic creation rate limits pause repeated topic creation attempts', async 
 });
 
 test('/new without --cwd opens the project selector', async () => {
+  const { root, restore } = await useTemporaryProjectsRoot();
   const state = memoryState();
   await state.bindChat(-100);
   const telegram = fakeTelegram();
   const codex = fakeCodex();
   const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
 
-  await bridge.start();
-  telegram.emit('update', { message: allowedMessage({ text: '/new Investigate bug', chat: { id: -100, type: 'supergroup' } }) });
-  await delay(100);
-  await bridge.stop();
+  try {
+    await createSelectableProject(root, 'toolbox');
+    await bridge.start();
+    telegram.emit('update', { message: allowedMessage({ text: '/new Investigate bug', chat: { id: -100, type: 'supergroup' } }) });
+    await delay(100);
+  } finally {
+    await bridge.stop();
+    restore();
+  }
 
   assert.deepEqual(codex.created, []);
   assert.match(telegram.sent.at(-1).text, /Select a project/);
@@ -921,19 +993,25 @@ test('startup registers Telegram command menu when supported', async () => {
 });
 
 test('/new inline help callback sends help text', async () => {
+  const { root, restore } = await useTemporaryProjectsRoot();
   const state = memoryState();
   await state.bindChat(-100);
   const telegram = fakeTelegram();
   const codex = fakeCodex();
   const bridge = new CodexTelegramTopicBridge({ codex, telegram, state, allowedUserIds: [111111111] });
 
-  await bridge.start();
-  telegram.emit('update', { message: allowedMessage({ text: '/new', chat: { id: -100, type: 'supergroup' } }) });
-  await delay(100);
-  const helpCallback = telegram.sent.at(-1).replyMarkup.inline_keyboard.at(-1)[0].callback_data;
-  telegram.emit('update', { callback_query: { id: 'help-cb', from: { id: 111111111 }, data: helpCallback } });
-  await delay(20);
-  await bridge.stop();
+  try {
+    await createSelectableProject(root, 'toolbox');
+    await bridge.start();
+    telegram.emit('update', { message: allowedMessage({ text: '/new', chat: { id: -100, type: 'supergroup' } }) });
+    await delay(100);
+    const helpCallback = telegram.sent.at(-1).replyMarkup.inline_keyboard.at(-1)[0].callback_data;
+    telegram.emit('update', { callback_query: { id: 'help-cb', from: { id: 111111111 }, data: helpCallback } });
+    await delay(20);
+  } finally {
+    await bridge.stop();
+    restore();
+  }
 
   assert.match(telegram.sent.at(-1).text, /Codex Toolbox commands/);
   assert.match(telegram.sent.at(-1).text, /\/new Optional title/);
@@ -1015,7 +1093,10 @@ test('unauthorized users cannot route topic replies', async () => {
   await bridge.stop();
 
   assert.deepEqual(codex.sent, []);
-  assert.deepEqual(telegram.sent, []);
+  assert.equal(telegram.sent.at(-1).chatId, -100);
+  assert.equal(telegram.sent.at(-1).messageThreadId, 44);
+  assert.match(telegram.sent.at(-1).text, /Telegram user 123 is not allowlisted/);
+  assert.match(telegram.sent.at(-1).text, /TELEGRAM_ALLOWED_USER_IDS/);
 });
 
 test('unauthorized users cannot answer approval callbacks', async () => {
@@ -1184,6 +1265,26 @@ async function execGit(args, cwd) {
   await execFileAsync('git', args, { cwd });
 }
 
+async function useTemporaryProjectsRoot() {
+  const root = await mkdtemp(join(tmpdir(), 'codex-toolbox-project-root-'));
+  const previousRoot = process.env.CODEX_PROJECTS_ROOT;
+  process.env.CODEX_PROJECTS_ROOT = root;
+  return {
+    root,
+    restore() {
+      if (previousRoot == null) delete process.env.CODEX_PROJECTS_ROOT;
+      else process.env.CODEX_PROJECTS_ROOT = previousRoot;
+    },
+  };
+}
+
+async function createSelectableProject(root, name) {
+  const project = join(root, name);
+  await mkdir(project, { recursive: true });
+  await execGit(['init'], project);
+  return project;
+}
+
 function sessionLine(type, payload) {
   return JSON.stringify({
     timestamp: new Date().toISOString(),
@@ -1200,6 +1301,32 @@ function responseMessageLine(role, text) {
       type: 'message',
       role,
       content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }],
+    },
+  });
+}
+
+function responseToolCallLine(name) {
+  return JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: 'response_item',
+    payload: {
+      type: 'custom_tool_call',
+      status: 'completed',
+      call_id: 'call-1',
+      name,
+      input: '{}',
+    },
+  });
+}
+
+function responseToolOutputLine(output) {
+  return JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: 'response_item',
+    payload: {
+      type: 'custom_tool_call_output',
+      call_id: 'call-1',
+      output,
     },
   });
 }

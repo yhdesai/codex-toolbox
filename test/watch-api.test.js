@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { WatchApiServer, parseWatchProjects } from '../src/watch-api.js';
+import { WatchApiServer, collectModuleStatus, parseModuleStatusTargets, parseWatchProjects } from '../src/watch-api.js';
 
 test('Watch API creates a Codex session and exposes progress', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'codex-watch-api-'));
@@ -61,12 +61,70 @@ test('Watch API enforces bearer token when configured', async () => {
   assert.equal(authorized.status, 200);
 });
 
+test('Watch API exposes HTTP module status', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-module-status-'));
+  await mkdir(join(root, 'erp-orders'));
+  await mkdir(join(root, 'erp-system'));
+  const api = new WatchApiServer({
+    codex: fakeCodex(),
+    port: 0,
+    moduleRoot: root,
+    moduleStatusMode: 'http',
+    moduleTargets: [
+      { name: 'erp-orders', url: 'http://orders.local' },
+      { name: 'erp-system', url: 'http://system.local/api/health' },
+    ],
+    fetchImpl: async (url) => ({
+      ok: String(url).includes('orders.local'),
+      status: String(url).includes('orders.local') ? 200 : 503,
+      statusText: 'Service Unavailable',
+    }),
+  });
+
+  const result = await ok(api.inject({ path: '/modules/status.json' }));
+  assert.equal(result.mode, 'http');
+  assert.equal(result.ok, false);
+  assert.equal(result.summary.expected, 2);
+  assert.equal(result.summary.online, 1);
+  assert.equal(result.modules.find((module) => module.name === 'erp-orders').target, 'http://orders.local/api/health');
+  assert.equal(result.modules.find((module) => module.name === 'erp-system').status, 'http_503');
+});
+
+test('collectModuleStatus supports PM2 development mode without real PM2', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-module-pm2-status-'));
+  await mkdir(join(root, 'erp-orders'));
+  const status = await collectModuleStatus({
+    mode: 'pm2',
+    root,
+    processList: async () => [{
+      name: 'modular-erp-orders',
+      pid: 123,
+      pm2_env: { status: 'online', restart_time: 2, pm_uptime: Date.now() - 60000 },
+      monit: { cpu: 0, memory: 1000 },
+    }],
+  });
+
+  assert.equal(status.mode, 'pm2');
+  assert.equal(status.ok, true);
+  assert.equal(status.modules[0].processName, 'modular-erp-orders');
+});
+
 test('parseWatchProjects supports named paths and cwd fallback', () => {
   assert.deepEqual(parseWatchProjects('web=/tmp/web,api=/tmp/api'), [
     { name: 'web', path: '/tmp/web' },
     { name: 'api', path: '/tmp/api' },
   ]);
   assert.deepEqual(parseWatchProjects('', '/tmp/project'), [{ name: 'project', path: '/tmp/project' }]);
+});
+
+test('parseModuleStatusTargets supports csv and json config', () => {
+  assert.deepEqual(parseModuleStatusTargets('erp-orders=http://orders.local,erp-system=http://system.local/api/health'), [
+    { name: 'erp-orders', url: 'http://orders.local', method: 'GET' },
+    { name: 'erp-system', url: 'http://system.local/api/health', method: 'GET' },
+  ]);
+  assert.deepEqual(parseModuleStatusTargets('[{"name":"erp-orders","url":"https://orders.example.com/health","method":"HEAD"}]'), [
+    { name: 'erp-orders', url: 'https://orders.example.com/health', method: 'HEAD' },
+  ]);
 });
 
 function fakeCodex() {

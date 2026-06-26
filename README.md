@@ -9,7 +9,7 @@ This project is intended for Codex users only right now. The easiest setup path 
 ## Features
 
 - Telegram: one forum topic per Codex thread.
-- Discord: one text channel per Codex thread, grouped under a project category named after the workspace folder.
+- Discord: one text channel per Codex thread, grouped under a category named after the project/worktree, for example `erp/main`.
 - Chat replies route back to the matching Codex thread.
 - `/new` or `!codex new` creates a new Codex thread and chat destination.
 - CLI-created Codex sessions are detected and mirrored.
@@ -118,6 +118,9 @@ CODEX_APP_SERVER_COMMAND=codex
 CODEX_APP_SERVER_ARGS="app-server proxy"
 CODEX_APP_SERVER_CWD=/path/to/workspace
 CODEX_TOOLBOX_STATE=~/.codex-toolbox.json
+CODEX_MESSAGE_SCOPE=all|conversation|none
+CODEX_TELEGRAM_MESSAGE_SCOPE=all|conversation|none
+CODEX_DISCORD_MESSAGE_SCOPE=all|conversation|none
 CODEX_TELEGRAM_POLL_MS=5000
 CODEX_TELEGRAM_PRIVATE_INTERVAL_MS=1000
 CODEX_TELEGRAM_GROUP_INTERVAL_MS=3200
@@ -136,6 +139,10 @@ Defaults:
 - `DISCORD_PROJECT_NAME`: workspace folder name
 - `DISCORD_COMMAND_PREFIX`: `!codex`
 - `DISCORD_GUILD_ID`: optional server id to pre-bind at startup
+- `CODEX_MESSAGE_SCOPE`: optional default mirrored Codex message scope for both providers
+- `CODEX_TELEGRAM_MESSAGE_SCOPE`: Telegram mirrored Codex message scope; defaults to `conversation`
+- `CODEX_DISCORD_MESSAGE_SCOPE`: Discord mirrored Codex message scope; defaults to `all`
+- Message scope values: `all` mirrors every supported Codex event, tool output, approval, and status notice; `conversation` mirrors only user and agent/assistant messages; `none` disables mirrored Codex transcript messages while keeping commands and replies usable.
 - `CODEX_TOOLBOX_STATE`: `~/.codex-toolbox.json`
 - `CODEX_TELEGRAM_POLL_MS`: `5000`
 - `CODEX_TELEGRAM_PRIVATE_INTERVAL_MS`: `1000`, one outbound Telegram message per second per private chat
@@ -198,7 +205,7 @@ pm2 save
 
 - `/bind`: bind the current forum group.
 - `/help`: list available commands.
-- `/new Optional title`: create a Codex thread and Telegram topic.
+- `/new Optional title`: choose a project and worktree, then create a Codex thread and Telegram topic.
 - `/new --cwd /absolute/path Optional title`: create a Codex thread in a specific directory. `--dir` is also accepted. Paths must be absolute; `~/path` is supported.
 - `/topics`: list current `threadId -> message_thread_id -> title` mappings.
 - `/delete_all_topics confirm`: delete all Codex-mapped Telegram topics, clear mappings and approvals, and keep the group binding.
@@ -218,17 +225,25 @@ Plain text inside a mapped topic is sent to the matching Codex thread. Plain tex
 
 - `!codex bind`: bind the current Discord server and create/reuse the project category.
 - `!codex help`: list available commands.
-- `!codex new Optional title`: create a Codex thread and Discord text channel under the project category.
-- `!codex status`: show binding, project category, mapped channels, allowed users, and discovery stats.
+- `!codex new Optional title`: choose a project and worktree, then create a Codex thread and Discord text channel under that project/worktree category.
+- `!codex new --cwd /absolute/path Optional title`: create a Codex thread and Discord text channel rooted in a specific directory. `--dir` is also accepted.
+- `!codex topics`: list current `threadId -> channel_id -> title` mappings.
+- `!codex status`: show binding, pause state, project category, mapped channels, known threads, approvals, allowed users, and recent errors.
 - `!codex resync`: run thread discovery immediately.
+- `!codex pause`: pause Codex-to-Discord mirroring; Discord replies and admin commands still work.
+- `!codex resume`: resume mirroring and run discovery.
+- `!codex rename <title>`: rename this Discord channel and attempt to rename the Codex thread.
 - `!codex interrupt`: interrupt the mapped Codex thread.
 - `!codex unlink`: remove this channel's Codex mapping without deleting the Discord channel.
 - `!codex relink <threadId>`: map this Discord channel to an existing Codex thread.
 - `!codex delete_all_channels confirm`: delete all Codex-mapped Discord channels and clear their mappings.
+- `!codex delete_unlinked_channels confirm`: delete Discord text channels across the whole server that are not linked to Codex threads.
+- `!codex delete_unlinked_channels project confirm`: delete Discord text channels in known Codex categories that are not linked to Codex threads.
+- `!codex logs`: show short redacted diagnostics from in-memory errors and PM2 log tails when readable.
 
 Plain text inside a mapped Discord channel is sent to the matching Codex thread. Plain text from an allowed user in an unmapped channel gets guidance. Unauthorized text is ignored silently.
 
-Discord creates one category for the current project, using `DISCORD_PROJECT_NAME` or the workspace folder name. Each Codex thread becomes a text channel inside that category.
+Discord creates categories for project/worktree roots, such as `erp/main` or `omniflow/ISO`. Each Codex session becomes a text channel inside the matching category.
 
 ## iPhone and Apple Watch API
 
@@ -300,9 +315,9 @@ The bridge mirrors human-readable events:
 
 The bridge does not mirror raw reasoning text or full command output chunks by default. Noisy lifecycle-only events such as `thread/status/changed`, `turn/started`, and `turn/completed` are suppressed.
 
-Assistant streaming deltas are buffered and sent once when the assistant message completes. Messages that originated in Telegram are de-duplicated so the bot does not echo the same text back into the topic.
+Assistant streaming deltas are buffered and sent once when the assistant message completes. Messages that originated in Telegram or Discord are de-duplicated so the bot does not echo the same text back into the topic or channel.
 
-For Codex CLI sessions that do not emit live app-server item events to this bridge process, the bridge polls the mapped Codex session JSONL file and mirrors new `user_message` and `agent_message` entries.
+For Codex CLI sessions that do not emit live app-server item events to this bridge process, the bridge polls the mapped Codex session JSONL file and mirrors new user, assistant, task-completion, tool-call, and tool-output entries.
 
 ## Discovery And State
 

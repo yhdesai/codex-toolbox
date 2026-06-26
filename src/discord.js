@@ -82,6 +82,16 @@ export class DiscordClient extends EventEmitter {
     });
   }
 
+  async listGuildChannels(guildId) {
+    return this.api('GET', `/guilds/${guildId}/channels`);
+  }
+
+  async editChannelName(channelId, name) {
+    return this.api('PATCH', `/channels/${channelId}`, {
+      name: sanitizeDiscordName(name),
+    });
+  }
+
   async deleteChannel(channelId) {
     return this.api('DELETE', `/channels/${channelId}`);
   }
@@ -89,7 +99,7 @@ export class DiscordClient extends EventEmitter {
   async sendMessage({ channelId, text, components = null }) {
     const results = [];
     let remainingComponents = components;
-    for (const chunk of chunkTelegramText(text, 1900)) {
+    for (const chunk of formatDiscordMessage(text)) {
       results.push(await this.api('POST', `/channels/${channelId}/messages`, {
         content: chunk,
         allowed_mentions: { parse: [] },
@@ -108,9 +118,12 @@ export class DiscordClient extends EventEmitter {
     const ws = new this.WebSocketImpl(this.gatewayUrl);
     this.ws = ws;
     addWsListener(ws, 'message', (event) => this.#handleMessage(event.data ?? event));
-    addWsListener(ws, 'close', () => {
+    addWsListener(ws, 'close', (event) => {
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+      const code = event?.code ?? '';
+      const reason = event?.reason ? String(event.reason) : '';
+      this.emit('error', new Error(`Discord gateway disconnected${code ? ` (${code})` : ''}${reason ? `: ${reason}` : ''}`));
       this.emit('disconnect');
       if (this.running) setTimeout(() => this.#connect(), 1500);
     });
@@ -190,6 +203,50 @@ export function approvalComponents(callbackId, labels = {}) {
       ],
     },
   ];
+}
+
+export function formatDiscordMessage(text, maxLength = 1900) {
+  const { actor, type, body } = parseDiscordMessage(text);
+  const header = `${actor} - ${type}`;
+  const overhead = header.length + '\n```\n\n```'.length;
+  const bodyLimit = Math.max(200, maxLength - overhead);
+  return chunkTelegramText(escapeCodeBlock(body || ' '), bodyLimit).map((chunk) => `${header}\n\`\`\`\n${chunk}\n\`\`\``);
+}
+
+function parseDiscordMessage(text) {
+  const raw = String(text ?? '');
+  const lines = raw.split('\n');
+  if (lines.length > 1 && isMessageTypeLine(lines[0])) {
+    const type = lines[0];
+    if (isActorLine(lines[1])) {
+      return { actor: lines[1], type, body: lines.slice(2).join('\n') };
+    }
+    return { actor: actorForType(type), type, body: lines.slice(1).join('\n') };
+  }
+  return { actor: 'Codex Toolbox', type: 'message', body: raw };
+}
+
+function isMessageTypeLine(value) {
+  return /^[A-Za-z0-9_/-]{2,80}$/.test(String(value ?? ''));
+}
+
+function isActorLine(value) {
+  return ['User', 'Codex', 'Tool', 'Plan', 'Error', 'Debug', 'Status'].includes(String(value ?? ''));
+}
+
+function actorForType(type) {
+  const value = String(type ?? '').toLowerCase();
+  if (value.includes('user')) return 'User';
+  if (value.includes('tool') || value.includes('exec') || value.includes('patch')) return 'Tool';
+  if (value.includes('plan')) return 'Plan';
+  if (value.includes('error')) return 'Error';
+  if (value.includes('debug')) return 'Debug';
+  if (value.includes('status') || value.includes('task_complete')) return 'Status';
+  return 'Codex';
+}
+
+function escapeCodeBlock(value) {
+  return String(value ?? '').replace(/```/g, '`` `');
 }
 
 function addWsListener(ws, event, listener) {

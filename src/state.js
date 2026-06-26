@@ -90,13 +90,14 @@ export class BridgeState {
     await this.save();
   }
 
-  async mapDiscordThread(threadId, channelId, categoryId, title = null) {
+  async mapDiscordThread(threadId, channelId, categoryId, title = null, categoryName = null) {
     const threadKey = String(threadId);
     const channelKey = String(channelId);
     this.data.discord.threads[threadKey] = {
       threadId: threadKey,
       channelId: channelKey,
       categoryId: categoryId == null ? null : String(categoryId),
+      categoryName: categoryName == null ? null : String(categoryName),
       title,
       updatedAt: new Date().toISOString(),
     };
